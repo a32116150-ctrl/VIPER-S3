@@ -1,0 +1,8 @@
+build/
+sdkconfig
+managed_components/
+*.swp
+*.swo
+*~
+.DS_Store
+

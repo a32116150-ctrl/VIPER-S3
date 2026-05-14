@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "wifi_engine.c"
+        "wifi_scanner.c"
+        "wifi_deauth.c"
+        "wifi_eviltwin.c"
+        "wifi_beacon_flood.c"
+        "wifi_pmkid.c"
+        "wifi_karma.c"
+        "captive_portal.c"
+        "dns_spoof.c"
+        "http_sniffer.c"
+    INCLUDE_DIRS "include"
+    REQUIRES
+        esp_wifi
+        esp_netif
+        esp_event
+        lwip
+        storage_manager
+        nvs_flash
+)

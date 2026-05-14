@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "camera_engine.c"
+        "quirc/quirc.c"
+    INCLUDE_DIRS
+        "include"
+        "quirc"
+    REQUIRES
+        esp_timer
+        storage_manager
+        esp_camera
+        driver
+)

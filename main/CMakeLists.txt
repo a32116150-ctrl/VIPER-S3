@@ -1,0 +1,25 @@
+idf_component_register(
+    SRCS
+        "main.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        wifi_engine
+        ble_engine
+        usb_engine
+        camera_engine
+        web_dashboard
+        crack_engine
+        responder
+        protocol_attacks
+        storage_manager
+        attack_orchestrator
+        ir_engine
+        nfc_engine
+        ai_engine
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        driver
+)
