@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "ble_engine.h"
+#include "wifi_engine.h"
 
 static const char *TAG = "AI";
 

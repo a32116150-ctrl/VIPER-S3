@@ -254,8 +254,8 @@ static void chain_conference_recon(void)
     storage_write_file("/viper/captures/recon_report.txt",
                        (uint8_t *)report, off, false);
 
-    web_dashboard_broadcast("recon_report",
-                            "{\"ble\":%d,\"wifi\":%d}", ble_count, ap_count);
+    snprintf(report, sizeof(report), "{\"ble\":%d,\"wifi\":%d}", ble_count, ap_count);
+    web_dashboard_broadcast("recon_report", report);
 
     s_chains_executed++;
     web_dashboard_broadcast("chain", "{\"name\":\"Conference Recon\",\"status\":\"done\"}");
@@ -305,8 +305,11 @@ static void chain_ble_mitm(void)
 
     ESP_LOGI(TAG, "[2/3] Starting MITM proxy against: %s",
              devs[best_idx].name[0] ? devs[best_idx].name : devs[best_idx].device_type);
-    web_dashboard_broadcast("chain", "{\"name\":\"BLE MITM\",\"status\":\"connecting\",\"target\":\"%s\"}",
-                            devs[best_idx].name);
+    char chain_msg[128];
+    snprintf(chain_msg, sizeof(chain_msg),
+        "{\"name\":\"BLE MITM\",\"status\":\"connecting\",\"target\":\"%s\"}",
+        devs[best_idx].name);
+    web_dashboard_broadcast("chain", chain_msg);
 
     esp_err_t ret = ble_mitm_start(devs[best_idx].addr,
                                     devs[best_idx].name[0] ? devs[best_idx].name : NULL,
@@ -365,14 +368,14 @@ static void health_log(void)
     system_health_t h;
     attack_orchestrator_get_health(&h);
 
-    ESP_LOGI(TAG, "Health: heap=%luKB/%luKB wifi=%d ble=%d cam=%d usb=%d chains=%lu",
+    ESP_LOGI(TAG, "Health: heap=%luKB/%luKB wifi=%lu ble=%d cam=%d usb=%d chains=%lu",
              h.heap_free, h.heap_min, h.wifi_mode, h.ble_active,
              h.camera_active, h.usb_active, h.chains_executed);
 
     /* Broadcast health via websocket */
     char buf[256];
     snprintf(buf, sizeof(buf),
-        "{\"heap\":%lu,\"wifi_mode\":%d,\"ble\":%d,\"cam\":%d,\"usb\":%d,\"chains\":%lu}",
+        "{\"heap\":%lu,\"wifi_mode\":%lu,\"ble\":%d,\"cam\":%d,\"usb\":%d,\"chains\":%lu}",
         h.heap_free, h.wifi_mode, h.ble_active, h.camera_active,
         h.usb_active, h.chains_executed);
     web_dashboard_broadcast("health", buf);
@@ -401,7 +404,9 @@ static void check_motion_trigger(void)
 {
     if (camera_engine_is_initialized() && camera_engine_motion_detected()) {
         ESP_LOGI(TAG, "Motion triggered!");
-        web_dashboard_broadcast("motion", "{\"value\":%d}", camera_engine_get_motion_value());
+        char motion_msg[64];
+        snprintf(motion_msg, sizeof(motion_msg), "{\"value\":%d}", camera_engine_get_motion_value());
+        web_dashboard_broadcast("motion", motion_msg);
 
         camera_engine_save_jpeg(DIR_CAPTURES_IMG "/motion.jpg");
 
@@ -529,7 +534,9 @@ void attack_orchestrator_check_triggers(void)
                 static uint8_t last_count = 0;
                 if (count > last_count) {
                     if (s_triggers[i].action) s_triggers[i].action(s_triggers[i].arg);
-                    web_dashboard_broadcast("client_connected", "{\"count\":%d}", count);
+                    char cc_msg[64];
+                    snprintf(cc_msg, sizeof(cc_msg), "{\"count\":%d}", count);
+                    web_dashboard_broadcast("client_connected", cc_msg);
                 }
                 last_count = count;
                 break;
@@ -546,9 +553,11 @@ void attack_orchestrator_check_triggers(void)
                         for (int b = 0; b < c; b++) {
                             if (memcmp(devs[b].addr, target, 6) == 0) {
                                 s_triggers[i].action(s_triggers[i].arg);
-                                web_dashboard_broadcast("ble_device_seen",
+                                char ble_msg[128];
+                                snprintf(ble_msg, sizeof(ble_msg),
                                     "{\"name\":\"%s\",\"rssi\":%d}",
                                     devs[b].name, devs[b].rssi);
+                                web_dashboard_broadcast("ble_device_seen", ble_msg);
                             }
                         }
                     }

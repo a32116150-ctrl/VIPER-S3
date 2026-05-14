@@ -83,7 +83,7 @@ void app_main(void)
 
     /* 5. Start camera engine (OV3660 — stream, QR, motion) */
     ESP_LOGI(TAG, "[5/6] Starting camera engine...");
-    camera_engine_init();
+    camera_engine_init(&CAMERA_CONFIG_DEFAULT);
 
     /* 6. Start web dashboard (HTTP + WebSocket on port 80) */
     ESP_LOGI(TAG, "[6/6] Starting web dashboard...");

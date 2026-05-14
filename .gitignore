@@ -1,6 +1,7 @@
 build/
 sdkconfig
 managed_components/
+.cache/
 *.swp
 *.swo
 *~

@@ -40,13 +40,14 @@ static rmt_receive_config_t s_rx_cfg = {
 static bool rx_done_cb(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     if (s_capturing && edata && edata->received_symbols && edata->num_symbols > 0) {
-        s_last_capture.pulse_count = edata->num_symbols;
-        for (int i = 0; i < edata->num_symbols && i < IR_SIGNAL_MAX_LEN; i++) {
-            s_last_capture.pulses[i] = edata->received_symbols[i].duration0;
-            if (i + 1 < edata->num_symbols && i + 1 < IR_SIGNAL_MAX_LEN) {
-                s_last_capture.pulses[++i] = edata->received_symbols[i].duration1;
+        int j = 0;
+        for (int i = 0; i < edata->num_symbols && j < IR_SIGNAL_MAX_LEN; i++) {
+            s_last_capture.pulses[j++] = edata->received_symbols[i].duration0;
+            if (j < IR_SIGNAL_MAX_LEN) {
+                s_last_capture.pulses[j++] = edata->received_symbols[i].duration1;
             }
         }
+        s_last_capture.pulse_count = j;
         s_capture_ready = true;
         s_capturing = false;
     }
@@ -317,7 +318,7 @@ esp_err_t ir_capture_start(uint32_t timeout_ms)
     if (timeout_ms > 0) {
         vTaskDelay(pdMS_TO_TICKS(timeout_ms));
         if (s_capturing) {
-            rmt_rx_stop(s_rx_channel);
+            rmt_disable(s_rx_channel);
             s_capturing = false;
         }
     }
@@ -328,7 +329,7 @@ esp_err_t ir_capture_start(uint32_t timeout_ms)
 esp_err_t ir_capture_stop(void)
 {
     s_capturing = false;
-    if (s_rx_channel) rmt_rx_stop(s_rx_channel);
+    if (s_rx_channel) rmt_disable(s_rx_channel);
     return ESP_OK;
 }
 

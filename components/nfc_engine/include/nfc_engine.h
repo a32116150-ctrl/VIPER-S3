@@ -4,7 +4,7 @@
 #include "esp_err.h"
 
 #define NFC_UID_MAX_LEN 7
-#define NFC_TAG_TYPE_MAX 16
+#define NFC_TAG_TYPE_MAX 32
 #define NFC_NDEF_MAX_LEN 512
 #define NFC_SECTOR_COUNT 64
 

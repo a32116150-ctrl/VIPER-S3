@@ -400,7 +400,11 @@ static esp_err_t serve_file(httpd_req_t *req, const char *path, const char *mime
 
 static esp_err_t download_handler(httpd_req_t *req)
 {
-    const char *type = httpd_req_get_url_query_str(req) ?: "";
+    char qbuf[64] = "";
+    const char *type = qbuf;
+    if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) == ESP_OK) {
+        type = qbuf;
+    }
     if (strstr(type, "creds")) return serve_file(req, FILE_CREDS, "application/json");
     if (strstr(type, "hashes")) return serve_file(req, FILE_HASHES, "application/json");
     if (strstr(type, "all")) {
@@ -512,7 +516,7 @@ static const char DASHBOARD_HTML[] =
     "</div>"
     "<div class='card'><h3>Recent Activity</h3><div class='log-viewer' id='activityLog'><div class='info'>Waiting for events...</div></div></div>"
     "</div>"
-    "<div class='panel' id='panel-wifi'><div class='card'><h3>Access Points</h3><div style='margin:8px 0'><button class='btn btn-primary btn-sm' onclick='scanWifi()'>Scan Now</button></div><div id='scanResults' style='overflow-x:auto'><div class='empty'>Click "Scan Now" to start</div></div></div></div>"
+    "<div class='panel' id='panel-wifi'><div class='card'><h3>Access Points</h3><div style='margin:8px 0'><button class='btn btn-primary btn-sm' onclick='scanWifi()'>Scan Now</button></div><div id='scanResults' style='overflow-x:auto'><div class='empty'>Click &quot;Scan Now&quot; to start</div></div></div></div>"
     "<div class='panel' id='panel-attacks'>"
     "<div class='cards'>"
     "<div class='card'><h3>Evil Twin</h3><div class='form-group'><label>SSID</label><input id='etSsid' value='AndroidAP_3F7A'></div><div class='form-group'><label>Channel</label><select id='etCh'><option>1</option><option>6</option><option>11</option></select></div><button class='btn btn-primary btn-sm' onclick='startEvilTwin()'>Start Evil Twin</button></div>"
@@ -674,6 +678,25 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     httpd_resp_send(req, DASHBOARD_HTML, sizeof(DASHBOARD_HTML) - 1);
     return ESP_OK;
 }
+
+/* ── Forward declarations for API handlers ───────── */
+
+static esp_err_t api_responder_start(httpd_req_t *req);
+static esp_err_t api_responder_stop(httpd_req_t *req);
+static esp_err_t api_responder_status(httpd_req_t *req);
+static esp_err_t api_smb_start(httpd_req_t *req);
+static esp_err_t api_smb_stop(httpd_req_t *req);
+static esp_err_t api_crack_start(httpd_req_t *req);
+static esp_err_t api_crack_status(httpd_req_t *req);
+static esp_err_t api_downgrade_start(httpd_req_t *req);
+static esp_err_t api_canary_create(httpd_req_t *req);
+static esp_err_t api_canary_list(httpd_req_t *req);
+static esp_err_t api_behavioral_results(httpd_req_t *req);
+static esp_err_t api_ble_proprietary(httpd_req_t *req);
+static esp_err_t api_ble_mitm_start(httpd_req_t *req);
+static esp_err_t api_ble_mitm_stop(httpd_req_t *req);
+static esp_err_t api_ble_mitm_status(httpd_req_t *req);
+static esp_err_t api_ble_mitm_services(httpd_req_t *req);
 
 /* ── URI Registration ───────────────────────────── */
 

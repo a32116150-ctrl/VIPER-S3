@@ -1,6 +1,7 @@
 #include "usb_engine.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_mac.h"
 #include "tinyusb.h"
 #include "tusb.h"
 #include "class/hid/hid.h"
@@ -144,56 +145,23 @@ static const uint8_t s_config_desc[] = {
     TUD_HID_DESCRIPTOR(ITF_NUM_HID, STRID_HID, HID_ITF_PROTOCOL_NONE,
                        sizeof(s_hid_report_desc), 0x81, CFG_TUD_HID_EP_BUFSIZE, 10),
 
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_COM, STRID_CDC, 0x82, 64, 0x83, 64),
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_COM, STRID_CDC, 0x82, 64, 0x83, 64, 64),
 };
 
-const uint8_t *tud_descriptor_device_cb(void)
-{
-    return (const uint8_t *)&s_dev_desc;
-}
+/* ── String Descriptor Table ─────────────────────── */
 
-const uint8_t *tud_descriptor_configuration_cb(uint8_t index)
-{
-    (void)index;
-    return s_config_desc;
-}
+static const char s_langid[2] = {0x09, 0x04};
+static char s_serial_str[16];
 
-const uint16_t *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
-{
-    (void)langid;
-    static uint16_t desc[32];
-    uint8_t len = 0;
-
-    switch (index) {
-        case STRID_LANGID:
-            desc[0] = 0x0304;
-            len = 1;
-            break;
-        case STRID_MANUFACTURER:
-            for (const char *s = "VIPER-S3"; *s; s++) desc[++len] = *s;
-            break;
-        case STRID_PRODUCT:
-            for (const char *s = "VIPER-S3 HID/CDC"; *s; s++) desc[++len] = *s;
-            break;
-        case STRID_SERIAL: {
-            uint32_t chip_id = (uint32_t)esp_efuse_mac_get_default(NULL);
-            char ser[16];
-            snprintf(ser, sizeof(ser), "%08X", chip_id);
-            for (const char *s = ser; *s; s++) desc[++len] = *s;
-            break;
-        }
-        case STRID_HID:
-            for (const char *s = "HID Keyboard"; *s; s++) desc[++len] = *s;
-            break;
-        case STRID_CDC:
-            for (const char *s = "CDC Serial"; *s; s++) desc[++len] = *s;
-            break;
-        default: return NULL;
-    }
-
-    desc[0] = (uint16_t)((len << 8) | 0x02);
-    return desc;
-}
+static const char *s_str_desc[] = {
+    s_langid,
+    "VIPER-S3",
+    "VIPER-S3 HID/CDC",
+    s_serial_str,
+    "HID Keyboard",
+    "CDC Serial",
+    NULL
+};
 
 const uint8_t *tud_hid_descriptor_report_cb(uint8_t itf)
 {
@@ -205,11 +173,17 @@ const uint8_t *tud_hid_descriptor_report_cb(uint8_t itf)
 
 esp_err_t usb_engine_init(void)
 {
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(s_serial_str, sizeof(s_serial_str), "%02X%02X%02X%02X%02X%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
     const tinyusb_config_t tusb_cfg = {
-        .device_descriptor = NULL,
-        .string_descriptor = NULL,
+        .device_descriptor = &s_dev_desc,
+        .string_descriptor = s_str_desc,
+        .string_descriptor_count = 6,
         .external_phy = false,
-        .configuration_descriptor = NULL,
+        .configuration_descriptor = s_config_desc,
     };
 
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
