@@ -1,6 +1,8 @@
 #include "usb_engine.h"
 #include "storage_manager.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>

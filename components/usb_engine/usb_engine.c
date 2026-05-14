@@ -1,9 +1,10 @@
 #include "usb_engine.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_efuse.h"
 #include "tinyusb.h"
 #include "tusb.h"
+#include "class/hid/hid.h"
+#include "class/hid/hid_device.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>

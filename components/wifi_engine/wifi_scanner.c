@@ -45,7 +45,7 @@ static void update_client_list(void)
         for (int i = 0; i < sta_list.num && i < WIFI_MAX_CLIENTS; i++) {
             memcpy(s_client_list[i].mac, sta_list.sta[i].mac, 6);
             s_client_list[i].rssi = sta_list.sta[i].rssi;
-            strncpy(s_client_list[i].oui_vendor, oui_lookup(sta_list.sta[i].mac), sizeof(s_client_list[i].oui_vendor) - 1);
+            strncpy((char *)s_client_list[i].oui_vendor, oui_lookup(sta_list.sta[i].mac), sizeof(s_client_list[i].oui_vendor) - 1);
         }
     }
 }
@@ -118,7 +118,7 @@ esp_err_t wifi_scan_start(void)
         s_scan_results[i].authmode = records[i].authmode;
         s_scan_results[i].hidden = (records[i].ssid[0] == 0);
 
-        strncpy(s_scan_results[i].oui_vendor, oui_lookup(records[i].bssid), sizeof(s_scan_results[i].oui_vendor) - 1);
+        strncpy((char *)s_scan_results[i].oui_vendor, oui_lookup(records[i].bssid), sizeof(s_scan_results[i].oui_vendor) - 1);
 
         char bssid_str[18];
         wifi_mac_to_str(records[i].bssid, bssid_str);

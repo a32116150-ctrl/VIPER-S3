@@ -141,7 +141,7 @@ esp_err_t crack_engine_crack_ntlm(const uint8_t *target_hash, const char *wordli
             uint64_t elapsed = (esp_timer_get_time() - start) / 1000;
             s_total_cracked++;
             s_total_attempts += attempts;
-            ESP_LOGI(TAG, "NTLM cracked: '%s' (%u attempts, %llu ms)", line, attempts, elapsed);
+            ESP_LOGI(TAG, "NTLM cracked: '%s' (%lu attempts, %llu ms)", line, (unsigned long)attempts, elapsed);
             return ESP_OK;
         }
     }

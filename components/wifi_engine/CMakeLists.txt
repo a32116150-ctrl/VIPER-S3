@@ -11,6 +11,8 @@ idf_component_register(
         "dns_spoof.c"
         "http_sniffer.c"
     INCLUDE_DIRS "include"
+    PRIV_REQUIRES
+        esp_timer
     REQUIRES
         esp_wifi
         esp_netif

@@ -7,6 +7,7 @@
 #include "esp_camera.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_check.h"
 #include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
@@ -19,8 +20,8 @@ const camera_config_t CAMERA_CONFIG_DEFAULT = {
     .pin_pwdn       = -1,
     .pin_reset      = -1,
     .pin_xclk       = 15,
-    .pin_siod       = 4,
-    .pin_sioc       = 5,
+    .pin_sccb_sda   = 4,
+    .pin_sccb_scl   = 5,
     .pin_d7         = 16,
     .pin_d6         = 17,
     .pin_d5         = 18,
@@ -33,8 +34,14 @@ const camera_config_t CAMERA_CONFIG_DEFAULT = {
     .pin_href       = 42,
     .pin_pclk       = 3,
     .xclk_freq_hz   = 20000000,
-    .resolution     = CAM_RES_VGA,
-    .pixel_format   = CAM_PIXEL_JPEG,
+    .ledc_timer     = LEDC_TIMER_0,
+    .ledc_channel   = LEDC_CHANNEL_0,
+    .pixel_format   = PIXFORMAT_JPEG,
+    .frame_size     = FRAMESIZE_VGA,
+    .jpeg_quality   = 12,
+    .fb_count       = 1,
+    .fb_location    = CAMERA_FB_IN_PSRAM,
+    .grab_mode      = CAMERA_GRAB_WHEN_EMPTY,
 };
 
 static bool s_initialized = false;
@@ -62,7 +69,7 @@ static int s_prev_h = 0;
 /* ── Frame capture (via esp_camera) ─────────────── */
 
 static esp_err_t capture_frame(uint8_t **buf, size_t *len, int *w, int *h,
-                                cam_pixel_format_t fmt)
+                                pixformat_t fmt)
 {
     (void)fmt;
 
@@ -85,33 +92,12 @@ static esp_err_t capture_frame(uint8_t **buf, size_t *len, int *w, int *h,
 
 static esp_err_t init_camera_hw(const camera_config_t *cfg)
 {
-    camera_config_t c = {
-        .pin_pwdn     = cfg->pin_pwdn,
-        .pin_reset    = cfg->pin_reset,
-        .pin_xclk     = cfg->pin_xclk,
-        .pin_sscb_sda = cfg->pin_siod,
-        .pin_sscb_scl = cfg->pin_sioc,
-        .pin_d7       = cfg->pin_d7,
-        .pin_d6       = cfg->pin_d6,
-        .pin_d5       = cfg->pin_d5,
-        .pin_d4       = cfg->pin_d4,
-        .pin_d3       = cfg->pin_d3,
-        .pin_d2       = cfg->pin_d2,
-        .pin_d1       = cfg->pin_d1,
-        .pin_d0       = cfg->pin_d0,
-        .pin_vsync    = cfg->pin_vsync,
-        .pin_href     = cfg->pin_href,
-        .pin_pclk     = cfg->pin_pclk,
-        .xclk_freq_hz = cfg->xclk_freq_hz,
-        .ledc_timer   = LEDC_TIMER_0,
-        .ledc_channel = LEDC_CHANNEL_0,
-        .pixel_format = (cfg->pixel_format == CAM_PIXEL_JPEG) ?
-                         PIXFORMAT_JPEG : PIXFORMAT_GRAYSCALE,
-        .frame_size   = (framesize_t)(cfg->resolution),
-        .jpeg_quality = 12,
-        .fb_count     = 2,
-        .grab_mode    = CAMERA_GRAB_WHEN_EMPTY,
-    };
+    camera_config_t c = *cfg;
+    c.ledc_timer = LEDC_TIMER_0;
+    c.ledc_channel = LEDC_CHANNEL_0;
+    c.jpeg_quality = 12;
+    c.fb_count = 2;
+    c.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
     esp_err_t ret = esp_camera_init(&c);
     if (ret != ESP_OK) {
@@ -126,7 +112,8 @@ static esp_err_t init_camera_hw(const camera_config_t *cfg)
         s->set_brightness(s, 0);
         s->set_contrast(s, 0);
         s->set_saturation(s, 0);
-        ESP_LOGI(TAG, "Sensor: %s", s->id.name);
+        camera_sensor_info_t *info = esp_camera_sensor_get_info(&s->id);
+        ESP_LOGI(TAG, "Sensor: %s", info ? info->name : "unknown");
     }
 
     return ESP_OK;
@@ -298,7 +285,7 @@ esp_err_t camera_engine_register_stream_cb(camera_stream_cb_t cb, void *ctx)
 
 /* ── Resolution/Format ──────────────────────────── */
 
-esp_err_t camera_engine_set_resolution(cam_resolution_t res)
+esp_err_t camera_engine_set_resolution(framesize_t res)
 {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
     sensor_t *s = esp_camera_sensor_get();
@@ -306,13 +293,12 @@ esp_err_t camera_engine_set_resolution(cam_resolution_t res)
     return s->set_framesize(s, (framesize_t)res);
 }
 
-esp_err_t camera_engine_set_pixel_format(cam_pixel_format_t fmt)
+esp_err_t camera_engine_set_pixel_format(pixformat_t fmt)
 {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
     sensor_t *s = esp_camera_sensor_get();
     if (!s) return ESP_FAIL;
-    pixformat_t pf = (fmt == CAM_PIXEL_JPEG) ? PIXFORMAT_JPEG : PIXFORMAT_GRAYSCALE;
-    return s->set_pixformat(s, pf);
+    return s->set_pixformat(s, fmt);
 }
 
 /* ── Motion Detection ───────────────────────────── */
@@ -328,7 +314,7 @@ static void motion_task(void *arg)
         if (!s) continue;
 
         framesize_t orig_fs = s->status.framesize;
-        pixformat_t orig_pf = s->status.pixformat;
+        pixformat_t orig_pf = s->pixformat;
 
         s->set_framesize(s, FRAMESIZE_QQVGA);
         s->set_pixformat(s, PIXFORMAT_GRAYSCALE);

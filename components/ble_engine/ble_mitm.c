@@ -126,7 +126,7 @@ static void build_advertised_services(void)
         int nl = strlen(s_target_name);
         if (nl > 28) nl = 28;
         s_adv_buf[s_adv_len++] = nl + 1;
-        s_adv_buf[s_adv_len++] = BLE_HS_ADV_TYPE_FULL_NAME;
+        s_adv_buf[s_adv_len++] = BLE_HS_ADV_TYPE_COMP_NAME;
         memcpy(s_adv_buf + s_adv_len, s_target_name, nl);
         s_adv_len += nl;
     }
@@ -265,8 +265,8 @@ static int central_gap_event_cb(struct ble_gap_event *event, void *arg)
             break;
         }
         case BLE_GAP_EVENT_DISCONNECT: {
-            ESP_LOGI(TAG, "MITM disconnected from target (reason=%d)",
-                     event->disconnect.reason.reason);
+        ESP_LOGI(TAG, "MITM disconnected from target (reason=%d)",
+                 event->disconnect.reason);
             s_central_connected = false;
             s_central_conn = 0;
             mitm_set_state(MITM_IDLE);
@@ -348,7 +348,7 @@ static void adv_init(void)
     init_adv[len++] = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     const char *proxy_name = "VIPER-MITM";
     init_adv[len++] = strlen(proxy_name) + 1;
-    init_adv[len++] = BLE_HS_ADV_TYPE_FULL_NAME;
+    init_adv[len++] = BLE_HS_ADV_TYPE_COMP_NAME;
     memcpy(init_adv + len, proxy_name, strlen(proxy_name));
     len += strlen(proxy_name);
 
@@ -437,7 +437,10 @@ esp_err_t ble_mitm_start(const uint8_t *target_addr, const char *target_name, ui
              s_target_addr[5], s_target_addr[4], s_target_addr[3],
              s_target_addr[2], s_target_addr[1], s_target_addr[0]);
 
-    int rc = ble_gap_connect(own_addr_type, s_target_addr, 3000, &conn_params,
+    ble_addr_t peer_addr = {0};
+    memcpy(peer_addr.val, s_target_addr, 6);
+    peer_addr.type = BLE_ADDR_PUBLIC;
+    int rc = ble_gap_connect(own_addr_type, &peer_addr, 3000, &conn_params,
                               central_gap_event_cb, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "MITM connect failed: %d", rc);

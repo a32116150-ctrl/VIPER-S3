@@ -82,5 +82,5 @@ bool ble_engine_is_synced(void) { return s_synced; }
 
 void ble_store_config_init(void)
 {
-    ble_store_util_status_rr();
+    ble_store_util_status_rr(NULL, NULL);
 }

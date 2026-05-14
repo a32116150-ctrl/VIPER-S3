@@ -7,13 +7,14 @@
 #define QUIRC_MAX_VERSION 10
 #define QUIRC_MODULE_SIZE(__v__) ((__v__) * 4 + 17)
 
-static const uint8_t gf_exp[QUIRC_GF_SIZE * 2];
-static const uint8_t gf_log[QUIRC_GF_SIZE];
+static uint8_t gf_exp[QUIRC_GF_SIZE * 2];
+static uint8_t gf_log[QUIRC_GF_SIZE];
 
 static void init_gf(void)
 {
     static int done;
-    if (done) return; done = 1;
+    if (done) return;
+    done = 1;
     int i, x = 1;
     for (i = 0; i < QUIRC_GF_SIZE; i++) {
         gf_exp[i] = gf_exp[i + QUIRC_GF_SIZE] = (uint8_t)x;

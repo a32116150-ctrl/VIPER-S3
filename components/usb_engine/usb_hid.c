@@ -1,6 +1,7 @@
 #include "usb_engine.h"
 #include "esp_log.h"
 #include "tusb.h"
+#include "class/hid/hid_device.h"
 #include <string.h>
 
 static const char *TAG = "USBHID";

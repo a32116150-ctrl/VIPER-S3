@@ -40,13 +40,6 @@ static ext_adv_set_t *find_set(uint8_t instance)
     return NULL;
 }
 
-static void ext_adv_stop_cb(int rc, void *arg)
-{
-    if (rc != 0) {
-        ESP_LOGW(TAG, "Ext adv stopped with rc=%d", rc);
-    }
-}
-
 esp_err_t ble_adv_ext_create_set(uint8_t phy, const char *tag, ble_adv_ext_set_handle_t *handle)
 {
     if (!handle) return ESP_ERR_INVALID_ARG;
@@ -54,10 +47,17 @@ esp_err_t ble_adv_ext_create_set(uint8_t phy, const char *tag, ble_adv_ext_set_h
     int idx = find_free_set();
     if (idx < 0) return ESP_ERR_NO_MEM;
 
-    uint8_t instance;
-    int rc = ble_gap_ext_adv_set_alloc(0, &instance, phy, BLE_GAP_EXT_ADV_DATA_STATUS_COMPLETE);
+    uint8_t instance = idx;
+
+    struct ble_gap_ext_adv_params params;
+    memset(&params, 0, sizeof(params));
+    params.primary_phy = (phy == BLE_GAP_LE_PHY_CODED) ? BLE_GAP_LE_PHY_CODED : BLE_GAP_LE_PHY_1M;
+    params.secondary_phy = phy;
+
+    int8_t selected_tx_power = 0;
+    int rc = ble_gap_ext_adv_configure(instance, &params, &selected_tx_power, NULL, NULL);
     if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to allocate ext adv set: %d", rc);
+        ESP_LOGE(TAG, "Failed to create ext adv set: %d", rc);
         return ESP_FAIL;
     }
 
@@ -86,10 +86,6 @@ esp_err_t ble_adv_ext_set_data(ble_adv_ext_set_handle_t handle, const uint8_t *d
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
     if (!om) return ESP_ERR_NO_MEM;
-
-    struct ble_hs_adv_fields ad;
-    memset(&ad, 0, sizeof(ad));
-    ad.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
     int rc = ble_gap_ext_adv_set_data(handle, om);
     if (rc != 0) {
@@ -127,7 +123,8 @@ esp_err_t ble_adv_ext_set_params(ble_adv_ext_set_handle_t handle, uint32_t inter
     if (params.itvl_max < 160) params.itvl_max = 160;
     if (params.itvl_max > 16384) params.itvl_max = 16384;
 
-    int rc = ble_gap_ext_adv_set_params(handle, &params);
+    int8_t selected_tx_power = 0;
+    int rc = ble_gap_ext_adv_configure(handle, &params, &selected_tx_power, NULL, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to set ext adv params: %d", rc);
         return ESP_FAIL;
@@ -143,7 +140,7 @@ esp_err_t ble_adv_ext_start(ble_adv_ext_set_handle_t handle, uint32_t duration_m
 
     if (set->running) return ESP_OK;
 
-    int rc = ble_gap_ext_adv_start(handle, duration_ms, 0, ext_adv_stop_cb, NULL);
+    int rc = ble_gap_ext_adv_start(handle, duration_ms, 0);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start ext adv (instance %d): %d", handle, rc);
         return ESP_FAIL;
@@ -178,7 +175,7 @@ esp_err_t ble_adv_ext_destroy_set(ble_adv_ext_set_handle_t handle)
 
     if (set->running) ble_adv_ext_stop(handle);
 
-    ble_gap_ext_adv_remove(handle, 0, 0);
+    ble_gap_ext_adv_remove(handle);
 
     set->in_use = false;
     ESP_LOGI(TAG, "Ext adv set destroyed: instance=%d", handle);
@@ -194,9 +191,9 @@ esp_err_t ble_adv_ext_set_periodic_data(ble_adv_ext_set_handle_t handle, const u
     memset(&params, 0, sizeof(params));
     params.itvl_min = 400;
     params.itvl_max = 800;
-    params.adv_properties = BLE_GAP_PERIODIC_ADV_PROP_INCLUDE_TX_POWER;
+    params.include_tx_power = 1;
 
-    int rc = ble_gap_periodic_adv_set_params(handle, &params);
+    int rc = ble_gap_periodic_adv_configure(handle, &params);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to set periodic adv params: %d", rc);
         return ESP_FAIL;
@@ -211,7 +208,7 @@ esp_err_t ble_adv_ext_set_periodic_data(ble_adv_ext_set_handle_t handle, const u
         return ESP_FAIL;
     }
 
-    rc = ble_gap_periodic_adv_start(handle, 0, 0);
+    rc = ble_gap_periodic_adv_start(handle);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start periodic adv: %d", rc);
         return ESP_FAIL;
@@ -242,7 +239,7 @@ esp_err_t ble_adv_ext_long_range_beacon(const char *name, uint32_t interval_ms)
         int nl = strlen(name);
         if (nl > 28) nl = 28;
         buf[len++] = nl + 1;
-        buf[len++] = BLE_HS_ADV_TYPE_FULL_NAME;
+        buf[len++] = BLE_HS_ADV_TYPE_COMP_NAME;
         memcpy(buf + len, name, nl);
         len += nl;
     }
@@ -271,7 +268,8 @@ esp_err_t ble_adv_ext_2m_scan_rsp(const uint8_t *data, uint16_t len)
     params.itvl_min = 160;
     params.itvl_max = 320;
 
-    int rc = ble_gap_ext_adv_set_params(handle, &params);
+    int8_t selected_tx_power = 0;
+    int rc = ble_gap_ext_adv_configure(handle, &params, &selected_tx_power, NULL, NULL);
     if (rc != 0) return ESP_FAIL;
 
     ret = ble_adv_ext_set_data(handle, data, len);

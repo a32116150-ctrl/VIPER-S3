@@ -123,10 +123,10 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             dev->rssi = d->rssi;
 
             uint8_t field_len = 0;
-            uint8_t *name = find_adv_field(BLE_HS_ADV_TYPE_FULL_NAME,
+            uint8_t *name = find_adv_field(BLE_HS_ADV_TYPE_COMP_NAME,
                                             d->data, d->length_data, &field_len);
             if (!name)
-                name = find_adv_field(BLE_HS_ADV_TYPE_SHORT_NAME,
+                name = find_adv_field(BLE_HS_ADV_TYPE_INCOMP_NAME,
                                       d->data, d->length_data, &field_len);
             if (name && field_len > 0) {
                 int copy = field_len < BLE_DEVICE_NAME_MAX - 1 ? field_len : BLE_DEVICE_NAME_MAX - 1;
@@ -157,10 +157,11 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                 }
             }
 
-            uint16_t *uuids = d->uuids16;
-            int uuid_count = d->uuids16_length / 2;
-            for (int i = 0; i < uuid_count && dev->service_count < 4; i++) {
-                dev->service_uuids[dev->service_count++] = uuids[i];
+            struct ble_hs_adv_fields adv_fields;
+            if (ble_hs_adv_parse_fields(&adv_fields, d->data, d->length_data) == 0) {
+                for (int i = 0; i < adv_fields.num_uuids16 && dev->service_count < 4; i++) {
+                    dev->service_uuids[dev->service_count++] = adv_fields.uuids16[i].value;
+                }
             }
 
             break;
@@ -191,7 +192,7 @@ esp_err_t ble_scanner_start(uint32_t duration_ms)
         .passive = 1,
     };
 
-    int rc = ble_gap_disc(own_addr_type, duration_ms, ble_gap_event_cb, &params);
+    int rc = ble_gap_disc(own_addr_type, duration_ms, &params, ble_gap_event_cb, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Scan start failed: %d", rc);
         return ESP_FAIL;

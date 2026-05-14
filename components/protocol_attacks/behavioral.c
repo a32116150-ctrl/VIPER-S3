@@ -165,9 +165,10 @@ app_type_t behavioral_classify(void)
         r->confidence = 0.7f;
         r->last_seen = esp_timer_get_time() / 1000;
 
-        ESP_LOGI(TAG, "Classified: %s (%d pkts, %d avg, %d sec, %.0f%% conf)",
-                 app_type_to_string(app), r->packet_count, r->avg_packet_size,
-                 r->duration_sec, r->confidence * 100);
+        ESP_LOGI(TAG, "Classified: %s (%lu pkts, %lu avg, %lu sec, %.0f%% conf)",
+                 app_type_to_string(app), (unsigned long)r->packet_count,
+                 (unsigned long)r->avg_packet_size, (unsigned long)r->duration_sec,
+                 r->confidence * 100);
     }
 
     return app;

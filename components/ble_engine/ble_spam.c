@@ -153,7 +153,7 @@ static void spam_task(void *arg)
                 .mfg_data_len = s_adv_len,
             };
 
-            ble_gap_adv_set_data(&ad);
+            ble_gap_adv_set_fields(&ad);
             ble_gap_adv_start(own_addr_type, NULL, 100, NULL, adv_stop_cb, NULL);
             vTaskDelay(pdMS_TO_TICKS(s_spam_rate_ms / 7));
             ble_gap_adv_stop();

@@ -63,13 +63,11 @@ static void karma_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
     if (type != WIFI_PKT_MGMT) return;
 
     wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
-    wifi_ieee80211_packet_t *ipkt = (wifi_ieee80211_packet_t *)pkt->payload;
-    uint16_t fc = (ipkt->frame_ctrl[1] << 8) | ipkt->frame_ctrl[0];
+    uint8_t *frame = pkt->payload;
+    uint16_t fc = (frame[1] << 8) | frame[0];
     uint8_t subtype = (fc >> 4) & 0x0F;
 
     if (subtype != 0x04) return;
-
-    uint8_t *frame = pkt->payload;
     uint16_t len = pkt->rx_ctrl.sig_len;
     uint8_t *src = &frame[10];
 

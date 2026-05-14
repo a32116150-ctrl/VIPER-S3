@@ -6,7 +6,7 @@ idf_component_register(
         "usb_payloads.c"
     INCLUDE_DIRS "include"
     REQUIRES
-        tinyusb
+        espressif__esp_tinyusb
         storage_manager
         driver
         esp_timer
