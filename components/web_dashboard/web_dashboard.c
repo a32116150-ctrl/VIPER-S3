@@ -6,10 +6,18 @@
 #include "crack_engine.h"
 #include "protocol_attacks.h"
 #include "ble_engine.h"
+#include "ir_engine.h"
+#include "nfc_engine.h"
+#include "usb_engine.h"
+#include "ai_engine.h"
+#include "attack_orchestrator.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -171,19 +179,21 @@ static esp_err_t api_clients_get(httpd_req_t *req)
 
     wifi_scan_get_clients(clients, &count);
 
-    char buf[4096];
-    int off = snprintf(buf, sizeof(buf), "{\"count\":%d,\"clients\":[", count);
+    char *buf = malloc(4096);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
+    int off = snprintf(buf, 4096, "{\"count\":%d,\"clients\":[", count);
     for (int i = 0; i < count; i++) {
         char mac[18];
         wifi_mac_to_str(clients[i].mac, mac);
-        off += snprintf(buf + off, sizeof(buf) - off,
+        off += snprintf(buf + off, 4096 - off,
             "%c{\"mac\":\"%s\",\"rssi\":%d,\"vendor\":\"%s\"}",
             i > 0 ? ',' : ' ', mac, clients[i].rssi, clients[i].oui_vendor);
     }
-    off += snprintf(buf + off, sizeof(buf) - off, "]}");
+    off += snprintf(buf + off, 4096 - off, "]}");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
+    free(buf);
     return ESP_OK;
 }
 
@@ -258,37 +268,47 @@ static esp_err_t api_attack_stop(httpd_req_t *req)
 
 static esp_err_t api_captures_creds(httpd_req_t *req)
 {
-    uint8_t buf[8192];
+    uint8_t *buf = malloc(8192);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
     size_t len = 0;
-    esp_err_t ret = storage_read_file(FILE_CREDS, buf, sizeof(buf) - 1, &len);
+    esp_err_t ret = storage_read_file(FILE_CREDS, buf, 8191, &len);
     if (ret != ESP_OK) {
+        free(buf);
         httpd_resp_sendstr(req, "{\"count\":0,\"entries\":[]}");
         return ESP_OK;
     }
     buf[len] = '\0';
 
-    char resp[8256];
-    int rlen = snprintf(resp, sizeof(resp), "{\"count\":%zu,\"entries\":[%s]}", len > 0 ? 1 : 0, buf);
+    char *resp = malloc(len + 128);
+    if (!resp) { free(buf); httpd_resp_send_500(req); return ESP_OK; }
+    int rlen = snprintf(resp, len + 128, "{\"count\":%zu,\"entries\":[%s]}", 1, (char *)buf);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, rlen);
+    free(resp);
+    free(buf);
     return ESP_OK;
 }
 
 static esp_err_t api_captures_hashes(httpd_req_t *req)
 {
-    uint8_t buf[8192];
+    uint8_t *buf = malloc(8192);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
     size_t len = 0;
-    esp_err_t ret = storage_read_file(FILE_HASHES, buf, sizeof(buf) - 1, &len);
+    esp_err_t ret = storage_read_file(FILE_HASHES, buf, 8191, &len);
     if (ret != ESP_OK) {
+        free(buf);
         httpd_resp_sendstr(req, "{\"count\":0,\"entries\":[]}");
         return ESP_OK;
     }
     buf[len] = '\0';
 
-    char resp[8256];
-    int rlen = snprintf(resp, sizeof(resp), "{\"count\":%zu,\"entries\":[%s]}", len > 0 ? 1 : 0, buf);
+    char *resp = malloc(len + 128);
+    if (!resp) { free(buf); httpd_resp_send_500(req); return ESP_OK; }
+    int rlen = snprintf(resp, len + 128, "{\"count\":%zu,\"entries\":[%s]}", 1, (char *)buf);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, rlen);
+    free(resp);
+    free(buf);
     return ESP_OK;
 }
 
@@ -497,14 +517,22 @@ static const char DASHBOARD_HTML[] =
     "<div class='status'><span class='dot'></span><span id='statusText'>Online</span> &middot; <span id='heapText'>0</span> KB free</div>"
     "</div>"
     "<div class='nav' id='nav'>"
-    "<a href='#' class='active' data-panel='overview'>Overview</a>"
-    "<a href='#' data-panel='wifi'>WiFi</a>"
-    "<a href='#' data-panel='attacks'>Attacks</a>"
-    "<a href='#' data-panel='captures'>Captures</a>"
-    "<a href='#' data-panel='camera'>Camera</a>"
-    "<a href='#' data-panel='logs'>Logs</a>"
-    "<a href='#' data-panel='ble'>BLE</a>"
-    "<a href='#' data-panel='config'>Config</a>"
+    "<a href='#' class='active' data-panel='overview' onclick='return switchPanel(\"overview\")'>Overview</a>"
+    "<a href='#' data-panel='wifi' onclick='return switchPanel(\"wifi\")'>WiFi</a>"
+    "<a href='#' data-panel='attacks' onclick='return switchPanel(\"attacks\")'>Attacks</a>"
+    "<a href='#' data-panel='captures' onclick='return switchPanel(\"captures\")'>Captures</a>"
+    "<a href='#' data-panel='camera' onclick='return switchPanel(\"camera\")'>Camera</a>"
+    "<a href='#' data-panel='logs' onclick='return switchPanel(\"logs\")'>Logs</a>"
+    "<a href='#' data-panel='ble' onclick='return switchPanel(\"ble\")'>BLE</a>"
+    "<a href='#' data-panel='config' onclick='return switchPanel(\"config\")'>Config</a>"
+    "<a href='#' data-panel='responder' onclick='return switchPanel(\"responder\")'>Responder</a>"
+    "<a href='#' data-panel='crack' onclick='return switchPanel(\"crack\")'>Crack</a>"
+    "<a href='#' data-panel='ir' onclick='return switchPanel(\"ir\")'>IR</a>"
+    "<a href='#' data-panel='nfc' onclick='return switchPanel(\"nfc\")'>NFC</a>"
+    "<a href='#' data-panel='protocol' onclick='return switchPanel(\"protocol\")'>Protocol</a>"
+    "<a href='#' data-panel='usb' onclick='return switchPanel(\"usb\")'>USB</a>"
+    "<a href='#' data-panel='ai' onclick='return switchPanel(\"ai\")'>AI</a>"
+    "<a href='#' data-panel='orchestrator' onclick='return switchPanel(\"orchestrator\")'>Orch</a>"
     "</div>"
     "<div class='main' id='main'>"
     "<div class='panel active' id='panel-overview'>"
@@ -513,6 +541,7 @@ static const char DASHBOARD_HTML[] =
     "<div class='card'><h3>WiFi Mode</h3><div class='value blue' id='wifiModeVal'>Idle</div></div>"
     "<div class='card'><h3>WS Clients</h3><div class='value yellow' id='wsClientsVal'>0</div></div>"
     "<div class='card'><h3>Uptime</h3><div class='value' id='uptimeVal'>0s</div></div>"
+    "<div class='card'><h3>JS Status</h3><div class='value green' id='jsStatus'>Waiting...</div></div>"
     "</div>"
     "<div class='card'><h3>Recent Activity</h3><div class='log-viewer' id='activityLog'><div class='info'>Waiting for events...</div></div></div>"
     "</div>"
@@ -543,10 +572,159 @@ static const char DASHBOARD_HTML[] =
     "<div class='card'><h3>Discovered GATT Services</h3><div id='mitmServices' style='overflow-x:auto'><div class='empty'>No services discovered yet</div></div></div>"
     "</div>"
     "<div class='panel' id='panel-config'>"
-    "<div class='card'><h3>Device Configuration</h3><div id='configForm'><div class='empty'>Loading...</div></div></div>"
+    "<div class='card'><h3>Device Configuration</h3>"
+    "<button class='btn btn-primary btn-sm' onclick='loadConfig()' style='margin-bottom:8px'>Refresh</button>"
+    "<div id='configForm'><div class='empty'>Click Refresh or switch to Config tab</div></div></div>"
     "</div>"
     "</div>"
+
+    "<div class='panel' id='panel-ir'>"
+    "<div class='cards'>"
+    "<div class='card'><h3>IR Capture & Replay</h3>"
+    "<p style='color:#888;font-size:12px;margin-bottom:12px'>Point remote at device (GPIO 4) and click Capture</p>"
+    "<button class='btn btn-primary btn-sm' onclick='captureIr()'>Start Capture</button>"
+    "<div id='irResult' style='margin-top:12px'><div class='empty'>Waiting for capture...</div></div>"
+    "</div>"
+    "<div class='card'><h3>Transmit NEC</h3>"
+    "<div class='form-group'><label>Address (Hex)</label><input id='irAddr' value='0x0000'></div>"
+    "<div class='form-group'><label>Command (Hex)</label><input id='irCmd' value='0x00'></div>"
+    "<button class='btn btn-primary btn-sm' onclick='sendIr()'>Send NEC</button>"
+    "</div>"
+    "</div>"
+    "<div class='card'><h3>Learned Signals</h3>"
+    "<div id='irLearned'><div class='empty'>No learned signals found in LittleFS</div></div>"
+    "</div>"
+    "</div>"
+    "<div class='panel' id='panel-nfc'>"
+    "<div class='cards'>"
+    "<div class='card'><h3>NFC Tag Discovery</h3>"
+    "<p style='color:#888;font-size:12px;margin-bottom:12px'>Place tag near PN532 (GPIO 18/5)</p>"
+    "<button class='btn btn-primary btn-sm' onclick='detectNfc()'>Scan Tag</button>"
+    "<div id='nfcResult' style='margin-top:12px'><div class='empty'>No tag detected</div></div>"
+    "</div>"
+    "<div class='card'><h3>NFC Cloner</h3>"
+    "<p style='color:#888;font-size:12px;margin-bottom:12px'>Copy UID from one tag to another (Magic UID tags required)</p>"
+    "<button class='btn btn-danger btn-sm' onclick='cloneNfc()'>Clone Tag</button>"
+    "</div>"
+    "</div>"
+    "</div>"
+
+    "<div class='panel' id='panel-usb'>"
+    "<div class='cards'>"
+    "<div class='card'><h3>HID Keyboard</h3>"
+    "<div class='form-group'><label>Text to Type</label><input id='usbText' value='Hello World'></div>"
+    "<button class='btn btn-primary btn-sm' onclick='sendUsbText()'>Type Text</button>"
+    "<div style='margin-top:8px'><button class='btn btn-sm btn-warn' onclick='releaseKeys()'>Release All</button></div>"
+    "</div>"
+    "<div class='card'><h3>Ducky Script</h3>"
+    "<div class='form-group'><label>Script</label><textarea id='duckyScript' rows='4' style='width:100%;background:#0a0e17;border:1px solid #2a3a4a;border-radius:4px;color:#e0e0e0;font-size:12px;font-family:monospace'>STRING Hello World\nENTER</textarea></div>"
+    "<button class='btn btn-primary btn-sm' onclick='runDucky()'>Run Script</button>"
+    "<div style='margin-top:8px'><button class='btn btn-sm btn-primary' onclick='listPayloads()'>List Payloads</button><div id='payloadList' style='margin-top:4px'><div class='empty'>/viper/payloads/</div></div></div>"
+    "</div>"
+    "<div class='card'><h3>Status</h3>"
+    "<div id='usbStatus' style='font-size:12px'><div class='info'>Loading...</div></div>"
+    "</div>"
+    "</div>"
+    "</div>"
+
+    "<div class='panel' id='panel-ai'>"
+    "<div class='cards'>"
+    "<div class='card'><h3>Digital Twins</h3>"
+    "<button class='btn btn-primary btn-sm' onclick='refreshTwins()'>Refresh</button>"
+    "<div id='twinList' style='margin-top:8px;overflow-x:auto'><div class='empty'>No twins</div></div>"
+    "</div>"
+    "<div class='card'><h3>Spawn</h3>"
+    "<div class='form-group'><label>Twin Index</label><input id='spawnIdx' value='0'></div>"
+    "<div class='form-group'><label>Duration (ms)</label><input id='spawnDur' value='10000'></div>"
+    "<button class='btn btn-primary btn-sm' onclick='spawnTwin()'>Spawn BLE</button>"
+    "<button class='btn btn-warn btn-sm' onclick='spawnAll()'>Spawn All</button>"
+    "</div>"
+    "<div class='card'><h3>Models</h3>"
+    "<button class='btn btn-sm btn-primary' onclick='refreshModels()'>List Models</button>"
+    "<div id='aiModels' style='margin-top:8px'><div class='empty'>No models loaded</div></div>"
+    "</div>"
+    "</div>"
+    "</div>"
+
+    "<div class='panel' id='panel-orchestrator'>"
+    "<div class='cards'>"
+    "<div class='card'><h3>Attack Chains</h3>"
+    "<div class='form-group'><label>Chain</label><select id='chainSelect'><option value='1'>WiFi Recon+EvilTwin</option><option value='4'>BLE MITM</option></select></div>"
+    "<button class='btn btn-primary btn-sm' onclick='runChain()'>Run</button>"
+    "<button class='btn btn-danger btn-sm' onclick='stopChain()'>Stop</button>"
+    "</div>"
+    "<div class='card'><h3>Scheduler</h3>"
+    "<div class='form-group'><label>Interval (ms)</label><input id='schedInterval' value='60000'></div>"
+    "<button class='btn btn-primary btn-sm' onclick='startSchedule()'>Schedule</button>"
+    "<button class='btn btn-danger btn-sm' onclick='stopSchedule()'>Unschedule</button>"
+    "</div>"
+    "<div class='card'><h3>System Health</h3>"
+    "<div id='orchHealth' style='font-size:12px'><div class='info'>Loading...</div></div>"
+    "</div>"
+    "</div>"
+    "</div>"
+
+    "<div class='panel' id='panel-responder'>"
+    "<div class='cards'>"
+    "<div class='card'><h3>LLMNR/NBT-NS/mDNS Poisoner</h3>"
+    "<div class='form-group'><label>Protocol</label><select id='responderProto'><option value='ALL'>ALL</option><option value='LLMNR'>LLMNR</option><option value='NBTNS'>NBT-NS</option><option value='MDNS'>mDNS</option></select></div>"
+    "<button class='btn btn-primary btn-sm' onclick='startResponder()'>Start</button>"
+    "<button class='btn btn-danger btn-sm' onclick='stopResponder()'>Stop</button>"
+    "<div id='responderStatus' style='margin-top:8px;font-size:12px;color:#888'>Idle</div>"
+    "</div>"
+    "<div class='card'><h3>SMB Honeypot</h3>"
+    "<p style='color:#888;font-size:12px;margin-bottom:8px'>Capture NTLM hashes via fake SMB share (port 445)</p>"
+    "<button class='btn btn-primary btn-sm' onclick='startSmb()'>Start</button>"
+    "<button class='btn btn-danger btn-sm' onclick='stopSmb()'>Stop</button>"
+    "<div id='smbStatus' style='margin-top:8px;font-size:12px;color:#888'>Idle</div>"
+    "</div>"
+    "</div>"
+    "<div class='card'><h3>Activity Log</h3><div class='log-viewer' id='responderLog'><div class='info'>Responder idle</div></div></div>"
+    "</div>"
+    "<div class='panel' id='panel-crack'>"
+    "<div class='cards'>"
+    "<div class='card'><h3>Submit Hash</h3>"
+    "<div class='form-group'><label>Hash Type</label><select id='crackType'><option value='0'>NTLM</option><option value='1'>MD5</option><option value='2'>SHA1</option><option value='3'>SHA256</option></select></div>"
+    "<div class='form-group'><label>Hash</label><input id='crackHash' placeholder='e.g. 32 hex chars'></div>"
+    "<div class='form-group'><label>Wordlist (optional)</label><input id='crackWordlist' placeholder='default: 10k common'></div>"
+    "<button class='btn btn-primary btn-sm' onclick='startCrack()'>Crack Now</button>"
+    "</div>"
+    "<div class='card'><h3>Engine Status</h3>"
+    "<div style='font-size:12px'>"
+    "<div style='margin:4px 0'><span style='color:#888'>Cracked:</span> <span id='crackedCount'>0</span></div>"
+    "<div style='margin:4px 0'><span style='color:#888'>Attempts:</span> <span id='crackAttempts'>0</span></div>"
+    "<div style='margin:4px 0'><span style='color:#888'>NTLM Speed:</span> <span id='ntlmSpeed'>0</span> H/s</div>"
+    "<div style='margin:4px 0'><span style='color:#888'>MD5 Speed:</span> <span id='md5Speed'>0</span> H/s</div>"
+    "<div style='margin:4px 0'><span style='color:#888'>SHA1 Speed:</span> <span id='sha1Speed'>0</span> H/s</div>"
+    "</div>"
+    "<button class='btn btn-sm btn-primary' onclick='refreshCrackStatus()' style='margin-top:8px'>Refresh</button>"
+    "</div>"
+    "</div>"
+    "<div class='card'><h3>Last Result</h3><div id='crackResult' class='empty'>Submit a hash to begin</div></div>"
+    "</div>"
+    "<div class='panel' id='panel-protocol'>"
+    "<div class='cards'>"
+    "<div class='card'><h3>WPA3→WPA2 Downgrade</h3>"
+    "<div class='form-group'><label>Evil Twin SSID</label><input id='dgSsid' value='DowngradeAP'></div>"
+    "<button class='btn btn-primary btn-sm' onclick='startDowngrade()'>Start Downgrade</button>"
+    "<div id='dgStatus' style='margin-top:8px;font-size:12px;color:#888'>Idle</div>"
+    "</div>"
+    "<div class='card'><h3>Canary Token</h3>"
+    "<div class='form-group'><label>Trigger URL (optional)</label><input id='canaryUrl' placeholder='/api/config'></div>"
+    "<button class='btn btn-primary btn-sm' onclick='createCanary()'>Create Token</button>"
+    "<div id='canaryResult' style='margin-top:8px;font-size:12px;color:#888'></div>"
+    "</div>"
+    "<div class='card'><h3>Behavioral Analysis</h3>"
+    "<p style='color:#888;font-size:12px;margin-bottom:8px'>Fingerprint network traffic by application type</p>"
+    "<button class='btn btn-primary btn-sm' onclick='refreshBehavioral()'>Refresh Results</button>"
+    "</div>"
+    "</div>"
+    "<div class='card'><h3>Canary Tokens</h3><div id='canaryList' class='empty'>No tokens created</div></div>"
+    "<div class='card' style='margin-top:12px'><h3>Traffic Fingerprints</h3><div id='behavioralResults' class='empty'>No data collected yet</div></div>"
+    "</div></div>"
+
     "<script>"
+    "console.log('VIPER-S3 JS loaded');"
     "let ws=null;let logLines=[];"
     "function connectWS(){"
     "ws=new WebSocket('ws://'+location.host+'/ws');"
@@ -568,17 +746,26 @@ static const char DASHBOARD_HTML[] =
     "var act=document.getElementById('activityLog');"
     "if(act){var ad=document.createElement('div');ad.textContent=msg;ad.style.fontSize='11px';act.appendChild(ad);act.scrollTop=act.scrollHeight}"
     "}"
-    "document.querySelectorAll('.nav a').forEach(function(a){"
-    "a.addEventListener('click',function(e){"
-    "e.preventDefault();"
+    "function switchPanel(name){"
+    "console.log('Switch panel: '+name);"
+    "try{"
     "document.querySelectorAll('.nav a').forEach(function(x){x.classList.remove('active')});"
-    "this.classList.add('active');"
+    "var el=document.querySelector('.nav a[data-panel=\"'+name+'\"]');if(el)el.classList.add('active');"
     "document.querySelectorAll('.panel').forEach(function(p){p.classList.remove('active')});"
-    "document.getElementById('panel-'+this.dataset.panel).classList.add('active');"
-    "if(this.dataset.panel=='overview')refreshOverview();"
-    "if(this.dataset.panel=='ble'){refreshProprietary();refreshMitmStatus()}"
-    "});"
-    "});"
+    "var target=document.getElementById('panel-'+name);"
+    "if(target){target.classList.add('active');window.scrollTo(0,0)}else{console.error('Panel not found:',name)}"
+    "if(name=='overview')refreshOverview();"
+    "if(name=='ble'){refreshProprietary();refreshMitmStatus()}"
+    "if(name=='config')loadConfig();"
+    "if(name=='responder')refreshResponderStatus();"
+    "if(name=='crack')refreshCrackStatus();"
+    "if(name=='protocol'){refreshCanaryList();refreshBehavioral()}"
+    "if(name=='usb')refreshUsbStatus();"
+    "if(name=='ai'){refreshTwins();refreshModels()}"
+    "if(name=='orchestrator')refreshHealth();"
+    "}catch(e){console.error('switchPanel error:',e)}"
+    "return false"
+    "}"
     "function scanWifi(){"
     "fetch('/api/attack/start',{method:'POST',body:JSON.stringify({mode:1})}).then(function(){"
     "setTimeout(function(){"
@@ -588,9 +775,9 @@ static const char DASHBOARD_HTML[] =
     "h+='</table>';"
     "document.getElementById('scanResults').innerHTML=h;"
     "});"
-    "},2000);"
-    "},2000);"
-    "}"
+"},2000);"
+"}).catch(function(){console.error('Scan start failed')});"
+"}"
     "function authClass(a){if(a==0)return'open';if(a>=3)return'wpa2';if(a>=5)return'wpa3';return''}"
     "function authName(a){var n=['Open','WEP','WPA-PSK','WPA2-PSK','WPA-WPA2','WPA2-Enterprise','WPA3-PSK','WPA3-Enterprise'];return n[a]||'Unknown'}"
     "function startEvilTwin(){"
@@ -604,14 +791,17 @@ static const char DASHBOARD_HTML[] =
     "fetch('/api/attack/stop',{method:'POST'});"
     "}"
     "function refreshCaptures(){"
-    "fetch('/api/captures/creds').then(function(r){return r.json()}).then(function(d){"
-    "if(!d.entries||d.entries.length===0){document.getElementById('credsList').innerHTML='<div class=\\'empty\\'>No credentials captured yet</div>';return}"
+    "fetch('/api/captures/creds').then(function(r){return r.text()}).then(function(text){"
+    "try{"
+    "var lines=text.trim().split('\\n');"
+    "if(!lines||lines[0]===''){document.getElementById('credsList').innerHTML='<div class=\\'empty\\'>No credentials captured yet</div>';return}"
     "var h='<table><tr><th>Source</th><th>Username</th><th>Password</th><th>MAC/IP</th></tr>';"
-    "(Array.isArray(d.entries)?d.entries:[d.entries]).forEach(function(e){"
-    "if(e&&e.user)h+='<tr><td>'+e.src+'</td><td class=\\'user\\'>'+e.user+'</td><td class=\\'pass\\'>'+e.pass+'</td><td>'+e.mac+'</td></tr>'"
+    "lines.forEach(function(line){"
+    "try{var e=JSON.parse(line);if(e&&e.user)h+='<tr><td>'+e.src+'</td><td class=\\'user\\'>'+e.user+'</td><td class=\\'pass\\'>'+e.pass+'</td><td>'+e.mac+'</td></tr>'}catch(ex){}"
     "});"
     "h+='</table>';document.getElementById('credsList').innerHTML=h;"
-    "});"
+    "}catch(e){console.error('Captures parse error:',e)}"
+    "}).catch(function(e){console.error('Captures fetch error:',e)});"
     "}"
     "function wipeCaptures(){if(confirm('Wipe all captured data?')){fetch('/api/captures/wipe',{method:'POST'}).then(function(){document.getElementById('credsList').innerHTML='<div class=\\'empty\\'>Wiped</div>'})}}"
     "function refreshProprietary(){"
@@ -666,16 +856,283 @@ static const char DASHBOARD_HTML[] =
     "var u=d.uptime_ms;var s=Math.floor(u/1000);var m=Math.floor(s/60);s=s%60;document.getElementById('uptimeVal').textContent=m+'m '+s+'s';"
     "});"
     "}"
+    "function loadConfig(){"
+    "fetch('/api/config').then(function(r){return r.json()}).then(function(d){"
+    "var h='<table style=\"font-size:13px\"><tr><th>Setting</th><th>Value</th></tr>';"
+    "Object.keys(d).forEach(function(k){h+='<tr><td style=\"color:#888\">'+k+'</td><td>'+JSON.stringify(d[k])+'</td></tr>'});"
+    "h+='</table>';"
+    "h+='<div style=\"margin-top:12px\"><p style=\"color:#888;font-size:12px\">Edit via POST /api/config with JSON body</p></div>';"
+    "document.getElementById('configForm').innerHTML=h;"
+    "}).catch(function(){document.getElementById('configForm').innerHTML='<div class=\\'empty\\'>Failed to load config</div>'})"
+    "}"
+    "var jsCount=0;"
+    "setInterval(function(){document.getElementById('jsStatus').textContent='Running ('+(++jsCount)+')'},2000);"
     "setInterval(refreshOverview,5000);"
     "connectWS();"
+    "function startResponder(){"
+    "var p=document.getElementById('responderProto').value;"
+    "var b=p=='ALL'?'{}':JSON.stringify({proto:p});"
+    "fetch('/api/responder/start',{method:'POST',body:b}).then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('responderStatus').textContent=d.ok?'Active':'Failed';"
+    "if(d.ok){setTimeout(refreshResponderStatus,1000)}"
+    "});"
+    "}"
+    "function stopResponder(){"
+    "fetch('/api/responder/stop',{method:'POST'}).then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('responderStatus').textContent='Stopped';"
+    "document.getElementById('responderLog').innerHTML='<div class=\\'info\\'>Responder stopped</div>'"
+    "});"
+    "}"
+    "function refreshResponderStatus(){"
+    "fetch('/api/responder/status').then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('responderStatus').textContent=d.running?'Active ('+d.poisoned+' poisoned)':'Idle';"
+    "if(d.running){setTimeout(refreshResponderStatus,3000)}"
+    "});"
+    "}"
+    "function startSmb(){"
+    "fetch('/api/smb/start',{method:'POST'}).then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('smbStatus').textContent=d.ok?'SMB honeypot active on port 445':'Failed';"
+    "});"
+    "}"
+    "function stopSmb(){"
+    "fetch('/api/smb/stop',{method:'POST'}).then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('smbStatus').textContent='Stopped';"
+    "});"
+    "}"
+    "function startCrack(){"
+    "var t=document.getElementById('crackType').value;"
+    "var h=document.getElementById('crackHash').value;"
+    "var w=document.getElementById('crackWordlist').value;"
+    "if(!h){document.getElementById('crackResult').innerHTML='<div class=\\'empty\\'>Enter a hash</div>';return}"
+    "document.getElementById('crackResult').innerHTML='<div class=\\'info\\'>Cracking...</div>';"
+    "fetch('/api/crack/start',{method:'POST',body:JSON.stringify({hash:h,type:parseInt(t),wordlist:w})}).then(function(r){return r.json()}).then(function(d){"
+    "if(d.found){"
+    "document.getElementById('crackResult').innerHTML='<div style=\\'color:#00ff88;font-weight:700\\'>Found: '+d.password+'</div><div style=\\'color:#888;font-size:12px\\'>'+d.attempts+' attempts in '+d.duration_ms+'ms</div>';"
+    "}else{"
+    "document.getElementById('crackResult').innerHTML='<div style=\\'color:#ffaa00\\'>Not cracked</div><div style=\\'color:#888;font-size:12px\\'>'+d.attempts+' attempts in '+d.duration_ms+'ms</div>';"
+    "}"
+    "refreshCrackStatus();"
+    "}).catch(function(){document.getElementById('crackResult').innerHTML='<div class=\\'empty\\'>Request failed</div>'});"
+    "}"
+    "function refreshCrackStatus(){"
+    "fetch('/api/crack/status').then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('crackedCount').textContent=d.cracked;"
+    "document.getElementById('crackAttempts').textContent=d.attempts;"
+    "document.getElementById('ntlmSpeed').textContent=d.ntlm_speed;"
+    "document.getElementById('md5Speed').textContent=d.md5_speed;"
+    "document.getElementById('sha1Speed').textContent=d.sha1_speed;"
+    "});"
+    "}"
+    "function startDowngrade(){"
+    "var s=document.getElementById('dgSsid').value;"
+    "fetch('/api/downgrade/start',{method:'POST',body:JSON.stringify({ssid:s})}).then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('dgStatus').textContent=d.ok?'Downgrade AP active: '+s:'Failed';"
+    "});"
+    "}"
+    "function createCanary(){"
+    "var u=document.getElementById('canaryUrl').value;"
+    "fetch('/api/canary/create',{method:'POST',body:JSON.stringify({url:u})}).then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('canaryResult').innerHTML=d.ok?'Token: <code style=\\'color:#00d4aa\\'>'+d.token+'</code><br>URL: <code style=\\'color:#888;font-size:11px\\'>'+d.url+'</code>':'Failed';"
+    "if(d.ok){refreshCanaryList()}"
+    "});"
+    "}"
+    "function refreshCanaryList(){"
+    "fetch('/api/canary/list').then(function(r){return r.json()}).then(function(d){"
+    "if(!d.count||d.count===0){document.getElementById('canaryList').innerHTML='<div class=\\'empty\\'>No tokens created</div>';return}"
+    "var h='<table><tr><th>Token</th><th>Hits</th><th>Last Seen</th></tr>';"
+    "d.tokens.forEach(function(t){"
+    "var ts=t.last_seen>0?new Date(t.last_seen*1000).toLocaleString():'Never';"
+    "h+='<tr><td style=\\'color:#00d4aa;font-size:11px\\'>'+t.token+'</td><td>'+t.hits+'</td><td>'+ts+'</td></tr>';"
+    "});"
+    "h+='</table>';"
+    "document.getElementById('canaryList').innerHTML=h;"
+    "});"
+    "}"
+    "function refreshBehavioral(){"
+    "document.getElementById('behavioralResults').innerHTML='<div class=\\'info\\'>Analyzing...</div>';"
+    "fetch('/api/behavioral').then(function(r){return r.json()}).then(function(d){"
+    "if(!d.count||d.count===0){document.getElementById('behavioralResults').innerHTML='<div class=\\'empty\\'>No traffic data yet</div>';return}"
+    "var h='<table><tr><th>Application</th><th>Confidence</th><th>Packets</th><th>Avg Size</th><th>Duration</th></tr>';"
+    "d.results.forEach(function(r){"
+    "h+='<tr><td>'+r.app+'</td><td>'+(r.confidence*100).toFixed(0)+'%</td><td>'+r.pkts+'</td><td>'+r.avg_size+'B</td><td>'+r.duration+'s</td></tr>';"
+    "});"
+    "h+='</table>';"
+    "document.getElementById('behavioralResults').innerHTML=h;"
+    "}).catch(function(){document.getElementById('behavioralResults').innerHTML='<div class=\\'empty\\'>Analysis failed</div>'});"
+    "}"
+    "function captureIr(){"
+    "document.getElementById('irResult').innerHTML='<div class=\\'info\\'>Capturing (5s timeout)...</div>';"
+    "fetch('/api/ir/capture').then(function(r){return r.json()}).then(function(d){"
+    "if(d.ok){"
+    "document.getElementById('irResult').innerHTML='<div style=\\'color:#00ff88\\'>Captured: Proto '+d.proto+'</div><div>Addr: 0x'+d.addr.toString(16)+' Cmd: 0x'+d.cmd.toString(16)+'</div>';"
+    "document.getElementById('irAddr').value=\"0x\"+d.addr.toString(16);"
+    "document.getElementById('irCmd').value=\"0x\"+d.cmd.toString(16);"
+    "}else{document.getElementById('irResult').innerHTML='<div style=\\'color:#ff4444\\'>Failed: '+d.error+'</div>'}"
+    "});"
+    "}"
+    "function sendIr(){"
+    "var a=parseInt(document.getElementById('irAddr').value);var c=parseInt(document.getElementById('irCmd').value);"
+    "fetch('/api/ir/send',{method:'POST',body:JSON.stringify({proto:0,addr:a,cmd:c})});"
+    "}"
+    "function detectNfc(){"
+    "document.getElementById('nfcResult').innerHTML='<div class=\\'info\\'>Scanning...</div>';"
+    "fetch('/api/nfc/detect').then(function(r){return r.json()}).then(function(d){"
+    "if(d.present){"
+    "document.getElementById('nfcResult').innerHTML='<div style=\\'color:#00ff88\\'>Tag Detected</div><div>Type: '+d.type+'</div><div>UID: '+d.uid+'</div><div>Sectors: '+d.sectors+'</div>';"
+    "}else{document.getElementById('nfcResult').innerHTML='<div class=\\'empty\\'>No tag detected</div>'}"
+    "});"
+    "}"
+    "function cloneNfc(){if(confirm('Start cloning?')){fetch('/api/nfc/clone',{method:'POST'}).then(function(r){return r.json()}).then(function(d){alert(d.ok?'Cloned!':'Failed')})}}"
+    "function refreshUsbStatus(){"
+    "fetch('/api/usb/status').then(function(r){return r.json()}).then(function(d){"
+    "var oses=['Unknown','Windows','macOS','Linux'];"
+    "document.getElementById('usbStatus').innerHTML="
+    "'<div>Mode: '+d.mode+'</div>'"
+    "+'<div>Host: '+(d.connected?'<span style=\"color:#00ff88\">Connected</span>':'<span style=\"color:#888\">Disconnected</span>')+'</div>'"
+    "+'<div>OS: '+oses[d.os]+'</div>'"
+    "})"
+    "}"
+    "function sendUsbText(){"
+    "var t=document.getElementById('usbText').value;"
+    "fetch('/api/usb/type',{method:'POST',body:JSON.stringify({text:t})})"
+    "}"
+    "function releaseKeys(){"
+    "fetch('/api/usb/release',{method:'POST'})"
+    "}"
+    "function runDucky(){"
+    "var s=document.getElementById('duckyScript').value;"
+    "fetch('/api/usb/ducky',{method:'POST',body:JSON.stringify({script:s})})"
+    "}"
+    "function listPayloads(){"
+    "fetch('/api/usb/payloads').then(function(r){return r.json()}).then(function(d){"
+    "if(!d.count){document.getElementById('payloadList').innerHTML='<div class=\\'empty\\'>No payloads</div>';return}"
+    "var h='<table><tr><th>Payload</th><th>Actions</th></tr>';"
+    "d.payloads.forEach(function(n){h+='<tr><td>'+n+'</td><td><button class=\\'btn btn-sm btn-primary\\' onclick=\\'runPayload(\"'+n+'\")\\'>Run</button></td></tr>'})"
+    "h+='</table>';document.getElementById('payloadList').innerHTML=h"
+    "})"
+    "}"
+    "function runPayload(name){"
+    "fetch('/api/usb/payload/run',{method:'POST',body:JSON.stringify({name:name})})"
+    "}"
+    "function refreshTwins(){"
+    "fetch('/api/ai/twins').then(function(r){return r.json()}).then(function(d){"
+    "if(!d.count){document.getElementById('twinList').innerHTML='<div class=\\'empty\\'>No twins</div>';return}"
+    "var h='<table><tr><th>Idx</th><th>Type</th><th>Name</th><th>Action</th></tr>';"
+    "d.twins.forEach(function(t,i){"
+    "h+='<tr><td>'+i+'</td><td>'+t.type+'</td><td>'+t.name+'</td>'"
+    "+'<td><button class=\\'btn btn-sm btn-danger\\' onclick=\\'deleteTwin('+i+')\\'>Del</button></td></tr>'"
+    "})"
+    "h+='</table>';document.getElementById('twinList').innerHTML=h"
+    "})"
+    "}"
+    "function deleteTwin(idx){"
+    "fetch('/api/ai/twins/delete',{method:'POST',body:JSON.stringify({index:idx})}).then(function(){refreshTwins()})"
+    "}"
+    "function spawnTwin(){"
+    "var idx=document.getElementById('spawnIdx').value;var dur=document.getElementById('spawnDur').value;"
+    "fetch('/api/ai/twins/spawn',{method:'POST',body:JSON.stringify({index:parseInt(idx),duration:parseInt(dur)})})"
+    "}"
+    "function spawnAll(){"
+    "var dur=document.getElementById('spawnDur').value;"
+    "fetch('/api/ai/twins/spawn_all',{method:'POST',body:JSON.stringify({duration:parseInt(dur)})})"
+    "}"
+    "function refreshModels(){"
+    "fetch('/api/ai/models').then(function(r){return r.json()}).then(function(d){"
+    "var h='<table><tr><th>Model</th><th>Type</th><th>Samples</th></tr>';"
+    "d.models.forEach(function(m){h+='<tr><td>'+m.name+'</td><td>'+m.type+'</td><td>'+m.samples+'</td></tr>'})"
+    "h+='</table>';document.getElementById('aiModels').innerHTML=h"
+    "})"
+    "}"
+    "function refreshHealth(){"
+    "fetch('/api/orchestrator/health').then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('orchHealth').innerHTML="
+    "'<div>Heap: '+d.heap_free+'KB (min: '+d.heap_min+'KB)</div>'"
+    "+'<div>WiFi Mode: '+d.wifi_mode+'</div>'"
+    "+'<div>BLE: '+(d.ble?'✓':'✗')+' Camera: '+(d.camera?'✓':'✗')+' USB: '+(d.usb?'✓':'✗')+'</div>'"
+    "+'<div>Creds: '+d.creds+' Hashes: '+d.hashes+'</div>'"
+    "+'<div>Chains Executed: '+d.chains+'</div>'"
+    "+'<div>Uptime: '+d.uptime_ms+'ms</div>'"
+    "})"
+    "}"
+    "function runChain(){"
+    "var c=document.getElementById('chainSelect').value;"
+    "fetch('/api/orchestrator/chain/run',{method:'POST',body:JSON.stringify({chain:parseInt(c)})}).then(function(){setTimeout(refreshHealth,1000)})"
+    "}"
+    "function stopChain(){"
+    "fetch('/api/orchestrator/chain/stop',{method:'POST'}).then(function(){refreshHealth()})"
+    "}"
+    "function startSchedule(){"
+    "var i=document.getElementById('schedInterval').value;"
+    "var c=document.getElementById('chainSelect').value;"
+    "fetch('/api/orchestrator/schedule',{method:'POST',body:JSON.stringify({interval_ms:parseInt(i),chain:parseInt(c)})})"
+    "}"
+    "function stopSchedule(){"
+    "fetch('/api/orchestrator/schedule/stop',{method:'POST'})"
+    "}"
     "</script></body></html>";
 
 /* ── Root handler ───────────────────────────────── */
 
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
+    size_t html_len = sizeof(DASHBOARD_HTML) - 1;
+    uint32_t free_pre = esp_get_free_heap_size();
+    uint32_t free_block_pre = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+
+    ESP_LOGI(TAG, "Serving dashboard HTML (%u bytes) — heap free: %lu KB, largest block: %lu",
+             html_len, free_pre / 1024, free_block_pre);
+
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, DASHBOARD_HTML, sizeof(DASHBOARD_HTML) - 1);
+
+    /* Try chunked send — avoids large stack allocation for buffer */
+    const char *ptr = DASHBOARD_HTML;
+    size_t remaining = html_len;
+    esp_err_t err = ESP_OK;
+
+    while (remaining > 0) {
+        size_t chunk = remaining > 512 ? 512 : remaining;
+        err = httpd_resp_send_chunk(req, ptr, chunk);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Chunk send failed at offset %u: %s",
+                     (unsigned)(ptr - DASHBOARD_HTML), esp_err_to_name(err));
+            break;
+        }
+        ptr += chunk;
+        remaining -= chunk;
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+
+    uint32_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
+    uint32_t free_post = esp_get_free_heap_size();
+    ESP_LOGI(TAG, "Dashboard served: %s (%u bytes, %u chunks) — stack HWM: %lu, heap: %lu->%lu KB",
+             err == ESP_OK ? "OK" : "FAIL",
+             html_len, (unsigned)((html_len + 511) / 512),
+             stack_hwm, free_pre / 1024, free_post / 1024);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send dashboard HTML: %s", esp_err_to_name(err));
+        /* Fallback: send minimal inline error page */
+        const char *fallback =
+            "<!DOCTYPE html><html><body style='background:#0a0e17;color:#ff4444;font-family:monospace;padding:40px'>"
+            "<h1>VIPER-S3</h1><p>Dashboard HTML transmission failed.</p>"
+            "<p>Check serial monitor for details.</p>"
+            "<p><a href='/api/status' style='color:#00d4aa'>API Status</a></p>"
+            "</body></html>";
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        httpd_resp_send(req, fallback, strlen(fallback));
+    }
+
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+/* ── Simple ping endpoint ────────────────────────── */
+
+static esp_err_t ping_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "OK", 2);
     return ESP_OK;
 }
 
@@ -697,12 +1154,39 @@ static esp_err_t api_ble_mitm_start(httpd_req_t *req);
 static esp_err_t api_ble_mitm_stop(httpd_req_t *req);
 static esp_err_t api_ble_mitm_status(httpd_req_t *req);
 static esp_err_t api_ble_mitm_services(httpd_req_t *req);
+static esp_err_t api_ir_capture(httpd_req_t *req);
+static esp_err_t api_ir_send(httpd_req_t *req);
+static esp_err_t api_ir_learned(httpd_req_t *req);
+static esp_err_t api_nfc_detect(httpd_req_t *req);
+static esp_err_t api_nfc_clone(httpd_req_t *req);
+
+/* ── Forward declarations: USB ──────────────────── */
+static esp_err_t api_usb_status(httpd_req_t *req);
+static esp_err_t api_usb_type(httpd_req_t *req);
+static esp_err_t api_usb_release(httpd_req_t *req);
+static esp_err_t api_usb_ducky(httpd_req_t *req);
+static esp_err_t api_usb_payloads(httpd_req_t *req);
+
+/* ── Forward declarations: AI ───────────────────── */
+static esp_err_t api_ai_twins(httpd_req_t *req);
+static esp_err_t api_ai_twins_delete(httpd_req_t *req);
+static esp_err_t api_ai_twins_spawn(httpd_req_t *req);
+static esp_err_t api_ai_twins_spawn_all(httpd_req_t *req);
+static esp_err_t api_ai_models(httpd_req_t *req);
+
+/* ── Forward declarations: Orchestrator ─────────── */
+static esp_err_t api_orch_health(httpd_req_t *req);
+static esp_err_t api_orch_chain_run(httpd_req_t *req);
+static esp_err_t api_orch_chain_stop(httpd_req_t *req);
+static esp_err_t api_orch_schedule(httpd_req_t *req);
+static esp_err_t api_orch_schedule_stop(httpd_req_t *req);
 
 /* ── URI Registration ───────────────────────────── */
 
 static const httpd_uri_t s_uris[] = {
     { .uri = "/",         .method = HTTP_GET,    .handler = root_get_handler },
-    { .uri = "/ws",       .method = HTTP_GET,    .handler = ws_handler },
+    { .uri = "/ping",     .method = HTTP_GET,    .handler = ping_get_handler },
+    { .uri = "/ws",       .method = HTTP_GET,    .handler = ws_handler, .is_websocket = true },
     { .uri = "/api/status",       .method = HTTP_GET,  .handler = api_status_get },
     { .uri = "/api/scan",         .method = HTTP_GET,  .handler = api_scan_get },
     { .uri = "/api/clients",      .method = HTTP_GET,  .handler = api_clients_get },
@@ -732,6 +1216,29 @@ static const httpd_uri_t s_uris[] = {
     { .uri = "/api/ble/mitm/stop",   .method = HTTP_POST, .handler = api_ble_mitm_stop },
     { .uri = "/api/ble/mitm/status", .method = HTTP_GET,  .handler = api_ble_mitm_status },
     { .uri = "/api/ble/mitm/services",.method = HTTP_GET,  .handler = api_ble_mitm_services },
+    { .uri = "/api/ir/capture",   .method = HTTP_GET,  .handler = api_ir_capture },
+    { .uri = "/api/ir/send",      .method = HTTP_POST, .handler = api_ir_send },
+    { .uri = "/api/ir/learned",   .method = HTTP_GET,  .handler = api_ir_learned },
+    { .uri = "/api/nfc/detect",   .method = HTTP_GET,  .handler = api_nfc_detect },
+    { .uri = "/api/nfc/clone",    .method = HTTP_POST, .handler = api_nfc_clone },
+    /* USB */
+    { .uri = "/api/usb/status",   .method = HTTP_GET,  .handler = api_usb_status },
+    { .uri = "/api/usb/type",     .method = HTTP_POST, .handler = api_usb_type },
+    { .uri = "/api/usb/release",  .method = HTTP_POST, .handler = api_usb_release },
+    { .uri = "/api/usb/ducky",    .method = HTTP_POST, .handler = api_usb_ducky },
+    { .uri = "/api/usb/payloads", .method = HTTP_GET,  .handler = api_usb_payloads },
+    /* AI */
+    { .uri = "/api/ai/twins",          .method = HTTP_GET,  .handler = api_ai_twins },
+    { .uri = "/api/ai/twins/delete",   .method = HTTP_POST, .handler = api_ai_twins_delete },
+    { .uri = "/api/ai/twins/spawn",    .method = HTTP_POST, .handler = api_ai_twins_spawn },
+    { .uri = "/api/ai/twins/spawn_all",.method = HTTP_POST, .handler = api_ai_twins_spawn_all },
+    { .uri = "/api/ai/models",         .method = HTTP_GET,  .handler = api_ai_models },
+    /* Orchestrator */
+    { .uri = "/api/orchestrator/health",    .method = HTTP_GET,  .handler = api_orch_health },
+    { .uri = "/api/orchestrator/chain/run", .method = HTTP_POST, .handler = api_orch_chain_run },
+    { .uri = "/api/orchestrator/chain/stop",.method = HTTP_POST, .handler = api_orch_chain_stop },
+    { .uri = "/api/orchestrator/schedule",     .method = HTTP_POST, .handler = api_orch_schedule },
+    { .uri = "/api/orchestrator/schedule/stop",.method = HTTP_POST, .handler = api_orch_schedule_stop },
 };
 
 /* ── API: Responder ─────────────────────────────── */
@@ -1053,25 +1560,472 @@ static esp_err_t api_ble_mitm_services(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── API: IR / NFC ──────────────────────────────── */
+
+static esp_err_t api_ir_capture(httpd_req_t *req)
+{
+    ir_capture_t cap;
+    esp_err_t ret = ir_capture_start(5000);
+    if (ret != ESP_OK) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"capture_start_failed\"}");
+        return ESP_OK;
+    }
+
+    /* Wait for ready (simplified for HTTP handler) */
+    int timeout = 50;
+    while (!ir_capture_is_ready() && timeout-- > 0) vTaskDelay(pdMS_TO_TICKS(100));
+
+    if (ir_capture_is_ready()) {
+        ir_capture_get(&cap);
+        char resp[128];
+        snprintf(resp, sizeof(resp), "{\"ok\":true,\"proto\":%d,\"addr\":%u,\"cmd\":%u}",
+                 cap.protocol, cap.address, cap.command);
+        httpd_resp_sendstr(req, resp);
+    } else {
+        ir_capture_stop();
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"timeout\"}");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t api_ir_send(httpd_req_t *req)
+{
+    char buf[128];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
+    buf[len] = '\0';
+
+    int proto = 0, addr = 0, cmd = 0;
+    const char *p = strstr(buf, "\"proto\"");
+    if (p) { p = strchr(p + 7, ':'); if (p) proto = atoi(p + 1); }
+    const char *a = strstr(buf, "\"addr\"");
+    if (a) { a = strchr(a + 6, ':'); if (a) addr = atoi(a + 1); }
+    const char *c = strstr(buf, "\"cmd\"");
+    if (c) { c = strchr(c + 5, ':'); if (c) cmd = atoi(c + 1); }
+
+    if (proto == IR_PROTOCOL_NEC) ir_send_nec(addr, cmd);
+    else if (proto == IR_PROTOCOL_SAMSUNG) ir_send_samsung(addr, cmd);
+    else if (proto == IR_PROTOCOL_SONY) ir_send_sony(cmd, addr, 12);
+
+    dashboard_log("IR send: proto=%d addr=0x%04x cmd=0x%02x", proto, addr, cmd);
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_ir_learned(httpd_req_t *req)
+{
+    char names[16][64];
+    int count = ir_learned_list(names, 16);
+    char *buf = malloc(count * 80 + 32);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
+
+    int off = sprintf(buf, "{\"count\":%d,\"names\":[", count);
+    for (int i = 0; i < count; i++) {
+        off += sprintf(buf + off, "%c\"%s\"", i > 0 ? ',' : ' ', names[i]);
+    }
+    sprintf(buf + off, "]}");
+    httpd_resp_sendstr(req, buf);
+    free(buf);
+    return ESP_OK;
+}
+
+static esp_err_t api_nfc_detect(httpd_req_t *req)
+{
+    nfc_tag_info_t info;
+    if (nfc_detect_tag(&info) == ESP_OK) {
+        char uid_str[24] = {0};
+        for (int i = 0; i < info.uid_len; i++) sprintf(uid_str + i * 2, "%02x", info.uid[i]);
+
+        char resp[256];
+        snprintf(resp, sizeof(resp), "{\"present\":true,\"type\":\"%s\",\"uid\":\"%s\",\"sectors\":%d}",
+                 info.tag_type, uid_str, info.sector_count);
+        httpd_resp_sendstr(req, resp);
+    } else {
+        httpd_resp_sendstr(req, "{\"present\":false}");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t api_nfc_clone(httpd_req_t *req)
+{
+    uint8_t key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    esp_err_t ret = nfc_clone_tag(key);
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"ok\":%d}", ret == ESP_OK);
+    httpd_resp_sendstr(req, resp);
+    if (ret == ESP_OK) dashboard_log("NFC tag cloned successfully");
+    return ESP_OK;
+}
+
+/* ── API: USB ────────────────────────────────────── */
+
+static esp_err_t api_usb_status(httpd_req_t *req)
+{
+    const char *modes[] = {"HID","CDC","RNDIS","MSC","COMBO"};
+    int mode = (int)usb_engine_get_mode();
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+        "{\"mode\":\"%s\",\"connected\":%d,\"os\":%d}",
+        mode >= 0 && mode < 5 ? modes[mode] : "?",
+        usb_engine_is_host_connected(),
+        (int)usb_os_fingerprint());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, strlen(buf));
+    return ESP_OK;
+}
+
+static esp_err_t api_usb_type(httpd_req_t *req)
+{
+    char buf[512];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
+    buf[len] = '\0';
+
+    const char *t = strstr(buf, "\"text\"");
+    if (t) {
+        t = strchr(t + 6, '"');
+        if (t) {
+            t++;
+            char text[256];
+            int i = 0;
+            while (*t && *t != '"' && i < 255) text[i++] = *t++;
+            text[i] = '\0';
+            usb_hid_send_string(text);
+        }
+    }
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_usb_release(httpd_req_t *req)
+{
+    usb_hid_release_all();
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_usb_ducky(httpd_req_t *req)
+{
+    char buf[2048];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
+    buf[len] = '\0';
+
+    const char *s = strstr(buf, "\"script\"");
+    if (s) {
+        s = strchr(s + 8, '"');
+        if (s) {
+            s++;
+            char script[1800];
+            int i = 0;
+            while (*s && *s != '"' && i < 1799) script[i++] = *s++;
+            script[i] = '\0';
+            usb_ducky_execute_string(script);
+        }
+    }
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_usb_payloads(httpd_req_t *req)
+{
+    char names[32][64];
+    int count = usb_payload_list(names, 32);
+
+    char *buf = malloc(count * 80 + 32);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
+
+    int off = snprintf(buf, 4096, "{\"count\":%d,\"payloads\":[", count);
+    for (int i = 0; i < count; i++)
+        off += snprintf(buf + off, 4096 - off, "%c\"%s\"", i > 0 ? ',' : ' ', names[i]);
+    off += snprintf(buf + off, 4096 - off, "]}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, off);
+    free(buf);
+    return ESP_OK;
+}
+
+/* ── API: AI Engine ───────────────────────────────── */
+
+static const char *ai_twin_type_name(ai_twin_type_t t)
+{
+    switch (t) {
+        case TWIN_TYPE_BLE_DEVICE: return "BLE";
+        case TWIN_TYPE_WIFI_AP:    return "WiFi";
+        case TWIN_TYPE_USB_DEVICE: return "USB";
+        case TWIN_TYPE_BEACON:     return "Beacon";
+        default:                   return "Unknown";
+    }
+}
+
+static esp_err_t api_ai_twins(httpd_req_t *req)
+{
+    ai_twin_profile_t twins[16];
+    int count = ai_twin_list(twins, 16);
+
+    char *buf = malloc(count * 256 + 64);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
+
+    int off = snprintf(buf, 4096, "{\"count\":%d,\"twins\":[", count);
+    for (int i = 0; i < count; i++) {
+        off += snprintf(buf + off, 4096 - off,
+            "%c{\"name\":\"%s\",\"type\":\"%s\",\"usage\":%lu}",
+            i > 0 ? ',' : ' ', twins[i].name,
+            ai_twin_type_name(twins[i].type),
+            twins[i].usage_count);
+    }
+    off += snprintf(buf + off, 4096 - off, "]}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, off);
+    free(buf);
+    return ESP_OK;
+}
+
+static esp_err_t api_ai_twins_delete(httpd_req_t *req)
+{
+    char buf[64];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
+    buf[len] = '\0';
+
+    int idx = 0;
+    const char *i = strstr(buf, "\"index\"");
+    if (i) { i = strchr(i + 7, ':'); if (i) idx = atoi(i + 1); }
+
+    ai_twin_delete(idx);
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_ai_twins_spawn(httpd_req_t *req)
+{
+    char buf[128];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
+    buf[len] = '\0';
+
+    int idx = 0;
+    uint32_t dur = 10000;
+    const char *i = strstr(buf, "\"index\"");
+    if (i) { i = strchr(i + 7, ':'); if (i) idx = atoi(i + 1); }
+    const char *d = strstr(buf, "\"duration\"");
+    if (d) { d = strchr(d + 10, ':'); if (d) dur = atoi(d + 1); }
+
+    ai_twin_spawn_ble(idx, dur);
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_ai_twins_spawn_all(httpd_req_t *req)
+{
+    char buf[64];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
+    buf[len] = '\0';
+
+    uint32_t dur = 10000;
+    const char *d = strstr(buf, "\"duration\"");
+    if (d) { d = strchr(d + 10, ':'); if (d) dur = atoi(d + 1); }
+
+    ai_twin_spawn_all(dur);
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_ai_models(httpd_req_t *req)
+{
+    const ai_decision_tree_t *tree = ai_get_app_classifier();
+    const ai_knn_model_t *knn = ai_get_ble_device_classifier();
+
+    char buf[512];
+    int off = snprintf(buf, sizeof(buf), "{\"models\":[");
+    bool first = true;
+    if (tree) {
+        off += snprintf(buf + off, sizeof(buf) - off,
+            "%c{\"name\":\"app_classifier\",\"type\":\"decision_tree\",\"nodes\":%d,\"classes\":%d}",
+            first ? ' ' : ',', tree->num_nodes, tree->num_classes);
+        first = false;
+    }
+    if (knn) {
+        off += snprintf(buf + off, sizeof(buf) - off,
+            "%c{\"name\":\"ble_device_classifier\",\"type\":\"knn\",\"samples\":%d,\"classes\":%d}",
+            first ? ' ' : ',', knn->num_samples, knn->num_classes);
+        first = false;
+    }
+    off += snprintf(buf + off, sizeof(buf) - off, "]}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, off);
+    return ESP_OK;
+}
+
+/* ── API: Orchestrator ───────────────────────────── */
+
+static esp_err_t api_orch_health(httpd_req_t *req)
+{
+    system_health_t h;
+    attack_orchestrator_get_health(&h);
+
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "{\"uptime_ms\":%lu,\"heap_free\":%lu,\"heap_min\":%lu,\"wifi_mode\":%lu,"
+        "\"ble\":%d,\"camera\":%d,\"usb\":%d,\"creds\":%lu,\"hashes\":%lu,\"chains\":%lu}",
+        h.uptime_ms, h.heap_free / 1024, h.heap_min / 1024,
+        h.wifi_mode, h.ble_active, h.camera_active, h.usb_active,
+        h.credentials_captured, h.hashes_captured, h.chains_executed);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, strlen(buf));
+    return ESP_OK;
+}
+
+static esp_err_t api_orch_chain_run(httpd_req_t *req)
+{
+    char buf[64];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len > 0) buf[len] = '\0';
+
+    int chain = 1;
+    const char *c = strstr(buf, "\"chain\"");
+    if (c) { c = strchr(c + 7, ':'); if (c) chain = atoi(c + 1); }
+
+    attack_orchestrator_run_chain((attack_chain_t)chain);
+    dashboard_log("Orchestrator: chain %d started", chain);
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_orch_chain_stop(httpd_req_t *req)
+{
+    attack_orchestrator_stop_chain();
+    dashboard_log("Orchestrator: chain stopped");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_orch_schedule(httpd_req_t *req)
+{
+    char buf[64];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
+    buf[len] = '\0';
+
+    uint32_t interval = 60000;
+    int chain = 1;
+    const char *i = strstr(buf, "\"interval_ms\"");
+    if (i) { i = strchr(i + 13, ':'); if (i) interval = atoi(i + 1); }
+    const char *c = strstr(buf, "\"chain\"");
+    if (c) { c = strchr(c + 7, ':'); if (c) chain = atoi(c + 1); }
+
+    attack_orchestrator_schedule(interval, (attack_chain_t)chain);
+    dashboard_log("Orchestrator: scheduled chain %d every %lu ms", chain, interval);
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t api_orch_schedule_stop(httpd_req_t *req)
+{
+    attack_orchestrator_unschedule();
+    dashboard_log("Orchestrator: schedule stopped");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+/* ── Watchdog ────────────────────────────────────── */
+
+static void dashboard_watchdog_task(void *arg)
+{
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(30000));
+        if (s_server == NULL) {
+            ESP_LOGW(TAG, "Watchdog: HTTP server is NULL — attempting restart...");
+            web_dashboard_init();
+        } else {
+            uint32_t free = esp_get_free_heap_size();
+            uint32_t min_free = esp_get_minimum_free_heap_size();
+            uint32_t hwm = uxTaskGetStackHighWaterMark(NULL);
+            ESP_LOGI(TAG, "Watchdog: server OK, heap free: %lu KB, min ever: %lu KB, stack HWM: %lu",
+                     free / 1024, min_free / 1024, hwm);
+        }
+    }
+}
+
+static void start_watchdog(void)
+{
+    static bool watchdog_started = false;
+    if (watchdog_started) return;
+    xTaskCreatePinnedToCore(dashboard_watchdog_task, "dash_wdt", 2048, NULL, 1, NULL, tskNO_AFFINITY);
+    watchdog_started = true;
+}
+
+/* ── Retry with conservative config ───────────────── */
+
+static esp_err_t try_start_server(void)
+{
+    /* Try full config first */
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.server_port = 80;
+    cfg.max_open_sockets = 8;
+    cfg.max_uri_handlers = sizeof(s_uris) / sizeof(s_uris[0]);
+    cfg.lru_purge_enable = true;
+    cfg.stack_size = 8192;
+
+    uint32_t free_before = esp_get_free_heap_size();
+    uint32_t block_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "Init starting — heap free: %lu KB, largest internal block: %lu",
+             free_before / 1024, block_before);
+
+    esp_err_t ret = httpd_start(&s_server, &cfg);
+    if (ret == ESP_OK) return ESP_OK;
+
+    ESP_LOGW(TAG, "httpd_start (8 sockets, 8KB stack) failed: %s — retrying with 4 sockets, 6KB stack...",
+             esp_err_to_name(ret));
+
+    /* Retry with smaller config */
+    httpd_config_t cfg2 = HTTPD_DEFAULT_CONFIG();
+    cfg2.server_port = 80;
+    cfg2.max_open_sockets = 4;
+    cfg2.max_uri_handlers = sizeof(s_uris) / sizeof(s_uris[0]);
+    cfg2.lru_purge_enable = true;
+    cfg2.stack_size = 6144;
+
+    uint32_t free_retry = esp_get_free_heap_size();
+    uint32_t block_retry = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "Retry — heap free: %lu KB, largest block: %lu",
+             free_retry / 1024, block_retry);
+
+    ret = httpd_start(&s_server, &cfg2);
+    if (ret == ESP_OK) {
+        ESP_LOGW(TAG, "Server started with reduced config (4 sockets, 3KB stack)");
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "httpd_start FAILED after retry: %s (heap: %lu KB, block: %lu)",
+             esp_err_to_name(ret), free_retry / 1024, block_retry);
+    return ret;
+}
+
 /* ── Init / Deinit ──────────────────────────────── */
 
 esp_err_t web_dashboard_init(void)
 {
     if (s_server) return ESP_OK;
 
-    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.server_port = 80;
-    cfg.max_open_sockets = 12;
-    cfg.lru_purge_enable = true;
-
-    if (httpd_start(&s_server, &cfg) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start HTTP server");
-        return ESP_FAIL;
-    }
+    esp_err_t ret = try_start_server();
+    if (ret != ESP_OK) return ret;
 
     for (int i = 0; i < sizeof(s_uris) / sizeof(s_uris[0]); i++) {
-        httpd_register_uri_handler(s_server, &s_uris[i]);
+        ret = httpd_register_uri_handler(s_server, &s_uris[i]);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to register URI handler %d: %s", i, esp_err_to_name(ret));
+        }
     }
+
+    uint32_t hwm = uxTaskGetStackHighWaterMark(NULL);
+    uint32_t free_after = esp_get_free_heap_size();
+    ESP_LOGI(TAG, "Init complete — stack HWM: %lu, heap free: %lu KB",
+             hwm, free_after / 1024);
 
     if (camera_engine_is_initialized()) {
         camera_engine_start_stream();
@@ -1079,6 +2033,8 @@ esp_err_t web_dashboard_init(void)
     }
     dashboard_log("Web dashboard online — http://192.168.4.1");
     ESP_LOGI(TAG, "Dashboard online — http://192.168.4.1");
+
+    start_watchdog();
     return ESP_OK;
 }
 

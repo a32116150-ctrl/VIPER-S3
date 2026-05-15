@@ -26,7 +26,7 @@ Multi-function ESP32-S3 security testing tool with WiFi, BLE, USB, camera, NFC, 
 | **Protocol Attacks** | WPA3→WPA2 downgrade, SSL strip, canary tokens, behavioral fingerprinting |
 | **AI/ML** | Decision tree, KNN classifier, packet feature extraction, digital twin generation |
 | **Orchestrator** | Attack chains, triggers, scheduler, health monitor |
-| **Dashboard** | Dark SPA with 27 REST endpoints, WebSocket live updates |
+| **Dashboard** | Dark SPA with 31 REST endpoints, WebSocket live updates, 11 frontend tabs |
 
 ## Partition Table (16MB)
 
@@ -50,21 +50,23 @@ idf.py -p /dev/ttyACM0 flash monitor
 ## Boot Sequence
 
 1. Mount LittleFS
-2. Start WiFi (AP on 192.168.4.1 + STA)
-3. Start BLE (NimBLE scanner + UART C2)
-4. Start USB (TinyUSB HID)
-5. Start Camera (OV3660 MJPEG)
-6. Start Web Dashboard (port 80)
-7. Initialize Responder + Crack Engine
-8. Start Protocol Attacks
-9. Start IR (GPIO2=TX, GPIO4=RX)
-10. Start NFC (PN532 UART: GPIO18=TX, GPIO5=RX)
-11. Start AI Engine
-12. Launch Attack Orchestrator
+2. **Start Web Dashboard (port 80)** — **BEFORE WiFi** to maximize available DRAM; retries with smaller config on failure
+3. Start WiFi (AP on 192.168.4.1 + STA) — SSID `VIPER-S3`, password `00000000` (⚠️ WPA2 broken, open AP temporarily)
+4. Start IR (GPIO2=TX, GPIO4=RX) — **graceful fallback** on failure
+5. Start NFC (PN532 UART: GPIO18=TX, GPIO5=RX) — **graceful fallback** on failure
+6. Initialize Crack Engine + Protocol Attacks — **graceful fallback** on failure
+7. Start BLE (NimBLE scanner + UART C2) — **graceful fallback** on failure (controller disabled to save DRAM)
+8. Start USB (TinyUSB HID + CDC) — **graceful fallback** on failure
+9. Start AI Engine — **graceful fallback** on failure
+10. Start Camera (OV3660 MJPEG) — **graceful fallback** on failure
+11. Launch Attack Orchestrator; retry dashboard init if failed at step 2
+
+**All steps 2+ use graceful fallback. Dashboard is served in 512-byte chunks, has a watchdog that auto-restarts the server, a /ping endpoint for quick health check, and a fallback error page if HTML can't be sent.**
 
 ## Access
 
 - **Dashboard**: http://192.168.4.1 (AP mode) or device IP
+- **WiFi AP**: SSID `VIPER-S3`, password `00000000` (⚠️ WPA2 broken — use open AP)
 - **BLE UART C2**: Connect via GATT
 - **USB**: Ducky Script payloads via CDC
 
@@ -77,10 +79,13 @@ idf.py -p /dev/ttyACM0 flash monitor
 ### Flash Once
 
 ```bash
-python3 -m esptool --chip esp32s3 -b 460800 write_flash \
+. ~/esp/esp-idf/export.sh
+esptool.py --chip esp32s3 -b 115200 write_flash \
   --flash_mode dio --flash_size 16MB --flash_freq 80m \
-  0x0 build/viper_s3_combined.bin
+  0x0 build/viper_s3_combined.bin --verify
 ```
+
+> **Note**: Baud rate 115200 is the most reliable. Higher rates (460800) may fail.
 
 ### Flash Separately (via idf.py)
 
@@ -108,6 +113,8 @@ The codebase was originally written for ESP-IDF v4.x/early v5.x. These fixes wer
 | Query string API | `httpd_req_get_url_query_str()` return type changed from `const char*` to `esp_err_t` — replaced `?: ""` with proper buffer-based call |
 | Forward declarations | Added forward declarations for all 16 REST API handlers before the `uri` array |
 | HTML escaping | Escaped double quotes in HTML string literal at line 515 (`&quot;Scan Now&quot;`) |
+| JS semicolon | Added missing `;` after forEach in `loadConfig` (line 740) — C string concatenation produced `})h+=''` with no semicolon, causing `SyntaxError: Unexpected identifier 'h'` |
+| Server stack size | Increased `cfg.stack_size` from 2048→4096 (line 1241) — 2KB caused `httpd_resp_send` to hang on ~27KB dashboard HTML; browser showed infinite loading spinner |
 
 ### IR Engine (`components/ir_engine/ir_engine.c`)
 | Fix | Details |

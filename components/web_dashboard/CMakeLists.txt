@@ -11,4 +11,9 @@ idf_component_register(
         responder
         crack_engine
         protocol_attacks
+        ir_engine
+        nfc_engine
+        usb_engine
+        ai_engine
+        attack_orchestrator
 )

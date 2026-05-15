@@ -186,7 +186,11 @@ esp_err_t usb_engine_init(void)
         .configuration_descriptor = s_config_desc,
     };
 
-    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+    esp_err_t ret = tinyusb_driver_install(&tusb_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "tinyusb_driver_install failed (%s) — USB disabled", esp_err_to_name(ret));
+        return ret;
+    }
 
     ESP_LOGI(TAG, "USB engine initialized (composite HID + CDC)");
     return ESP_OK;

@@ -14,6 +14,7 @@
 #include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_event.h"
@@ -66,69 +67,102 @@ void app_main(void)
     system_init();
 
     /* 1. Mount LittleFS — all modules depend on storage */
-    ESP_LOGI(TAG, "[1/6] Mounting storage...");
+    ESP_LOGI(TAG, "[1/11] Mounting storage...");
     storage_init();
 
-    /* 2. Start WiFi engine (AP + STA + monitor mode capable) */
-    ESP_LOGI(TAG, "[2/6] Starting WiFi engine...");
-    wifi_engine_init();
-
-    /* 3. Start BLE engine (NimBLE — scanner, spam, UART C2) */
-    ESP_LOGI(TAG, "[3/6] Starting BLE engine...");
-    ble_engine_init();
-
-    /* 4. Start USB engine (TinyUSB — HID/RNDIS/CDC) */
-    ESP_LOGI(TAG, "[4/6] Starting USB engine...");
-    usb_engine_init();
-
-    /* 5. Start camera engine (OV3660 — stream, QR, motion) */
-    ESP_LOGI(TAG, "[5/6] Starting camera engine...");
-    camera_engine_init(&CAMERA_CONFIG_DEFAULT);
-
-    /* 6. Start web dashboard (HTTP + WebSocket on port 80) */
-    ESP_LOGI(TAG, "[6/6] Starting web dashboard...");
-    web_dashboard_init();
-
-    /* 7. Start responder + crack engine (Phase 7 features) */
-    ESP_LOGI(TAG, "[7/7] Initializing crack engine...");
-    crack_engine_init();
-
-    /* 8. Protocol attacks (downgrade, canary, behavioral) */
-    ESP_LOGI(TAG, "[8/8] Initializing protocol attacks...");
-    downgrade_engine_init(DOWNGRADE_SSL);
-    behavioral_init();
-
-    /* Boot complete — hand off to attack orchestrator */
-    ESP_LOGI(TAG, "✓ All modules online. Dashboard: http://192.168.4.1");
-    ESP_LOGI(TAG, "✓ BLE UART C2 active. Connect via BLE GATT.");
-    ESP_LOGI(TAG, "✓ Responder & crack engine ready. Start via dashboard.");
-    ESP_LOGI(TAG, "✓ Protocol attacks: SSL strip, canary, behavioral ready.");
-    ESP_LOGI(TAG, "✓ BLE Advanced: ext advertising, proprietary scans, MITM proxy.");
-    ESP_LOGI(TAG, "✓ Phase 10: BadUSB payloads, IR engine, NFC ready.");
-    ESP_LOGI(TAG, "✓ Phase 11: ML classification + digital twin engine ready.");
-
-    /* 9. IR engine (RMT — GPIO2=TX, GPIO4=RX) */
-    ESP_LOGI(TAG, "[9/9] Initializing IR engine...");
-    ir_engine_init(2, 4);
-
-    /* 10. NFC engine (PN532 — UART1: GPIO18=TX, GPIO5=RX) */
-    ESP_LOGI(TAG, "[10/10] Initializing NFC engine...");
-    esp_err_t nfc_ret = nfc_engine_init(NFC_PN532_MODE_UART, 18, 5, -1, -1);
-    if (nfc_ret != ESP_OK) {
-        ESP_LOGW(TAG, "NFC module not detected — skipping");
+    /* 2. Start camera engine early — needs fresh internal DRAM pool for DMA descriptors.
+       Must allocate before dashboard+WiFi fragment the 32KB reserved pool. */
+    ESP_LOGI(TAG, "[2/11] Starting camera engine...");
+    {
+        esp_err_t r = camera_engine_init(&CAMERA_CONFIG_DEFAULT);
+        if (r != ESP_OK) ESP_LOGW(TAG, "[2/11] Camera engine skipped: %s", esp_err_to_name(r));
     }
 
-    /* 11. AI engine (ML classification + digital twin) */
-    ESP_LOGI(TAG, "[11/11] Initializing AI engine...");
-    ai_engine_init();
+    /* 3. Start web dashboard (CRITICAL — must succeed). Done BEFORE WiFi so DRAM is maximally available. */
+    ESP_LOGI(TAG, "[3/11] Starting web dashboard...");
+    {
+        esp_err_t r = web_dashboard_init();
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "[3/11] Dashboard init failed: %s — will retry later",
+                     esp_err_to_name(r));
+        }
+    }
 
-    attack_orchestrator_start();
+    /* 4. Start WiFi engine (optional — graceful failure) */
+    ESP_LOGI(TAG, "[4/11] Starting WiFi engine...");
+    {
+        esp_err_t r = wifi_engine_init();
+        if (r != ESP_OK) ESP_LOGW(TAG, "[4/11] WiFi engine skipped: %s", esp_err_to_name(r));
+    }
+
+    /* 5. Start IR engine (optional — graceful failure) */
+    ESP_LOGI(TAG, "[5/11] Initializing IR engine...");
+    {
+        esp_err_t r = ir_engine_init(2, 4);
+        if (r != ESP_OK) ESP_LOGW(TAG, "[5/11] IR engine skipped: %s", esp_err_to_name(r));
+    }
+
+    /* 6. Start NFC engine (optional — graceful failure) */
+    ESP_LOGI(TAG, "[6/11] Initializing NFC engine...");
+    {
+        esp_err_t r = nfc_engine_init(NFC_PN532_MODE_UART, 18, 5, -1, -1);
+        if (r != ESP_OK) ESP_LOGW(TAG, "[6/11] NFC engine skipped: %s", esp_err_to_name(r));
+    }
+
+    /* 7. Start crack engine & protocol attacks (optional) */
+    ESP_LOGI(TAG, "[7/11] Initializing attack engines...");
+    {
+        esp_err_t r = crack_engine_init();
+        if (r != ESP_OK) ESP_LOGW(TAG, "[7/11] Crack engine skipped: %s", esp_err_to_name(r));
+    }
+    {
+        esp_err_t r = downgrade_engine_init(DOWNGRADE_SSL);
+        if (r != ESP_OK) ESP_LOGW(TAG, "[7/11] Downgrade engine skipped: %s", esp_err_to_name(r));
+    }
+    {
+        esp_err_t r = behavioral_init();
+        if (r != ESP_OK) ESP_LOGW(TAG, "[7/11] Behavioral engine skipped: %s", esp_err_to_name(r));
+    }
+
+    /* 8. Start BLE engine (optional — graceful failure) */
+    ESP_LOGI(TAG, "[8/11] Starting BLE engine...");
+    {
+        esp_err_t r = ble_engine_init();
+        if (r != ESP_OK) ESP_LOGW(TAG, "[8/11] BLE engine skipped: %s", esp_err_to_name(r));
+    }
+
+    /* 9. Start USB engine (optional — graceful failure) */
+    ESP_LOGI(TAG, "[9/11] Starting USB engine...");
+    {
+        esp_err_t r = usb_engine_init();
+        if (r != ESP_OK) ESP_LOGW(TAG, "[9/11] USB engine skipped: %s", esp_err_to_name(r));
+    }
+
+    /* 10. AI engine (optional — graceful failure) */
+    ESP_LOGI(TAG, "[10/11] Initializing AI engine...");
+    {
+        esp_err_t r = ai_engine_init();
+        if (r != ESP_OK) ESP_LOGW(TAG, "[10/11] AI engine skipped: %s", esp_err_to_name(r));
+    }
+
+
+    {
+        esp_err_t r = attack_orchestrator_start();
+        if (r != ESP_OK) ESP_LOGW(TAG, "[11/11] Attack orchestrator skipped: %s", esp_err_to_name(r));
+    }
+
+    /* Retry dashboard init if it failed earlier (now WiFi is up, DRAM may have shifted) */
+    if (web_dashboard_init() == ESP_OK) {
+        ESP_LOGI(TAG, "Dashboard started on retry — ready at http://192.168.4.1");
+    }
 
     /* Main task becomes the health monitor */
     while (1) {
-        ESP_LOGI(TAG, "[HEAP] Free: %lu KB | Min ever: %lu KB",
-                 esp_get_free_heap_size() / 1024,
-                 esp_get_minimum_free_heap_size() / 1024);
+        uint32_t free = esp_get_free_heap_size();
+        uint32_t min_free = esp_get_minimum_free_heap_size();
+        uint32_t block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        ESP_LOGI(TAG, "[HEALTH] Free: %lu KB | Min: %lu KB | Int block: %lu B",
+                 free / 1024, min_free / 1024, block);
         vTaskDelay(pdMS_TO_TICKS(30000));
     }
 }

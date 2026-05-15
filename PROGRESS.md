@@ -1,8 +1,10 @@
 # VIPER-S3 Development Progress
 
+> **Current Status**: Device flashed successfully but USB serial port disappeared after hard reset — cannot monitor or re-flash until USB re-enumerates. Firmware built with dashboard stability fixes (stack_size=4096, chunked transfer, retry logic, watchdog, /ping endpoint, BLE controller disabled, dashboard before WiFi in boot order). See [PROJECT_MEMORY.md](./PROJECT_MEMORY.md) for full details.
+
 ## Phase 1 — Core Infrastructure ✅
 - `CMakeLists.txt`, `partitions.csv`, `sdkconfig.defaults`
-- `main/main.c` — Boot: NVS → storage → WiFi → BLE → USB → Camera → Dashboard → CrackEngine → Orchestrator
+- `main/main.c` — Boot: LittleFS → **Dashboard** (before WiFi, max DRAM) → WiFi → IR → NFC → Crack/Protocol → BLE (controller disabled) → USB → AI → Camera → Orchestrator
 - `storage_manager/` — LittleFS, 9 dirs, cred/hash JSONL logging, wordlist iterator
 - `web_dashboard/` — ESP HTTP server, 27 REST endpoints, WebSocket, dark SPA
 
@@ -63,6 +65,47 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
 | **Feature Extraction** | `ai_engine.c` | Packet flow feature extraction (size, interval, burst ratio). BLE/WiFi feature extraction stubs. |
 | **Digital Twin** | `ai_engine.c` | Profile library (BLE/WiFi/USB). Twin creation from observed devices. BLE spam spawn, WiFi beacon flood spawn. Persistence to LittleFS. |
 | **Fingerprinting** | `ai_engine.c` | BLE advertisement fingerprinting, WiFi (SSID+BSSID) fingerprinting, similarity comparison. |
+
+## Current Blockers
+
+| Issue | Status | Details |
+|-------|--------|---------|
+| Internal DRAM fragmentation | 🟡 Reduced | Camera now uses PSRAM DMA mode (`CONFIG_CAMERA_PSRAM_DMA=y`) — eliminates 16KB contiguous internal DRAM requirement |
+| Camera DMA allocation fails | ✅ | Fixed — PSRAM DMA mode enabled in sdkconfig.defaults; DMA descriptors point to PSRAM, no longer needs 16KB internal DRAM block |
+| HTTP server start failure | ✅ | Fixed — dashboard starts BEFORE WiFi (step 2), stack_size=4096+retry, BLE controller disabled to free ~30KB |
+| HTTP server boot-loop (out of memory) | ✅ | Fixed — `max_open_sockets=8`, `max_uri_handlers` auto-calculated from `sizeof(s_uris)`, `stack_size=4096` |
+| HTTP response hangs (infinite spinner) | ✅ | Fixed — chunked transfer (512B), fallback error page, watchdog auto-recovery |
+| BLE controller init fails | ✅ | Acceptable — controller disabled (`CONFIG_BT_CONTROLLER_DISABLED=y`) to free DRAM; NimBLE host compiles, graceful fallback |
+| USB init | ✅ | Graceful fallback in place — no crash |
+| Web Dashboard nav tabs | ✅ | Fixed — switched from addEventListener to onclick attributes |
+| Dashboard JS syntax error | ✅ | Fixed — missing semicolon in loadConfig JS |
+| WPA2-PSK auth failure | ✅ | Fixed — `esp_wifi_disable_pmf_config(WIFI_IF_AP)` added; stale PMF "required" values in NVS from ESP-IDF v5.3 cleared on boot |
+| USB serial enumeration post-flash | ❌ **BLOCKING** | After flash + hard reset, ESP32-S3 USB serial port disappeared from macOS; cannot monitor or re-flash |
+| WiFi AP | ⚠️ | SSID `VIPER-S3`, reachable at 192.168.4.1 — WPA2-PSK fix applied (needs flash + test verification) |
+
+## Mitigations Applied
+
+| Fix | Impact |
+|-----|--------|
+| BLE graceful fallback (`nimble_port_init()` return check) | Prevents reboot loop when BLE fails |
+| USB graceful fallback (`tinyusb_driver_install()` return check) | Prevents reboot loop when USB fails |
+| `CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y` | Moves NimBLE host to PSRAM, frees ~30KB internal DRAM |
+| `CONFIG_BT_CTRL_BLE_MAX_ACT=3` (was 6) | Reduces BLE controller DRAM requirement |
+| `CONFIG_LWIP_MAX_SOCKETS=16` (was 10) | HTTP server socket pool raised; actual `max_open_sockets=8` in code |
+| `max_open_sockets=8` (was 12) | Saves ~6KB DRAM from LWIP socket buffers; prevents boot-loop |
+| HTTP server stack 4096 (was 2048) | Reverted to default; 2048 was insufficient for serving ~27KB dashboard HTML, causing `httpd_resp_send` to hang silently |
+| `max_uri_handlers=31` (was default 8) | All 31 API endpoints register; none get "no slots left" error |
+
+## Next Steps
+- [ ] **🔴 USB enumeration** — Reboot MacBook, try different cable to get ESP32-S3 serial port back
+- [ ] **Flash & test** — Flash the new firmware (PMF fix, PSRAM DMA, USB/AI/Orch tabs, Protocol nav link)
+- [ ] **Test dashboard** — Verify http://192.168.4.1 loads, test /ping endpoint
+- [ ] **Test WPA2-PSK** — Verify clients can connect with password "00000000" post-fix
+- [ ] Diagnose MacBook DHCP issue (may get self-assigned IP instead of 192.168.4.x)
+- [ ] Add `/api/clients` frontend (client list exists but no JS polling calls it)
+- [ ] Commit and push to GitHub
+
+---
 
 ## Project Statistics
 ```

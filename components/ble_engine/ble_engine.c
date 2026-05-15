@@ -47,7 +47,12 @@ esp_err_t ble_engine_init(void)
     }
     if (ret != ESP_OK) return ret;
 
-    nimble_port_init();
+    ret = nimble_port_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "nimble_port_init failed (%s) — BLE disabled", esp_err_to_name(ret));
+        return ret;
+    }
+
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
