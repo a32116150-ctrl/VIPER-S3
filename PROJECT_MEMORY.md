@@ -644,9 +644,9 @@ Source-verified findings from code audit across all 13 components.
 - Project root: `/Users/anoircherif/Desktop/S3/antigravity`
 - IDF path: `~/esp/esp-idf`
 - Built by opencode with assistant guidance
-- Last build: May 17, 2026 (Build succeeded — 0x12bf30, 71% app partition free)
-- Last flash: May 17, 2026 — built, flashed, pushed `8aef938`
-- Last fix batch: May 17, 2026 — 8 bugs fixed: auth_check return type (tab freeze), root_get_handler bad recovery (white screen), missing /api/usb/payload/run, addAutopwnLog double-append, DOMContentLoaded→IIFE, 3× })h ASI syntax errors
+- Last build: May 17, 2026 (Build succeeded — 0x12d470, 71% app partition free)
+- Last flash: May 17, 2026 — built, flashed, pushed `dce6940`
+- Last fix batch: May 17, 2026 — UI redesign (Cyber-Viper tactical terminal), plus 8 bug fixes from earlier (auth_check, root_get_handler, missing endpoint, addAutopwnLog, DOMContentLoaded, 3× })h ASI)
 
 ---
 
@@ -667,6 +667,23 @@ All remaining dashboard-breaking bugs fixed. The device now serves a fully funct
 | 4 | **addAutopwnLog double log** | First `el.appendChild(d)` orphaned the element before innerHTML assignment | Removed first `appendChild` (`web_dashboard.c:1322-1325`) |
 | 5 | **switchPanel never defined** | `DOMContentLoaded` listener registered inside end-of-body `<script>` — event already fired | Replaced with IIFE (`web_dashboard.c:1373-1376`) |
 | 6-8 | **Tabs unclickable** (3× `})h` ASI errors) | `listPayloads`/`refreshTwins`/`refreshModels` forEach callbacks ended with `})` but next C string started with `h+='</table>'`. Concatenation: `...})h+='...'` — no line terminator between `)` and `h` → JS ASI doesn't fire → `SyntaxError: Unexpected identifier 'h'` → entire `<script>` block fails to parse | Added `;` after each `})` (`web_dashboard.c:1238,1252,1270`) |
+
+### [2026-05-17] UI Redesign — Cyber-Viper Tactical Terminal
+
+Complete UI/UX overhaul of the web dashboard SPA. Cyber-Viper / retro tactical terminal aesthetic.
+
+| Area | Before | After |
+|------|--------|-------|
+| **Font** | System sans-serif (`-apple-system, BlinkMacSystemFont, Segoe UI, ...`) | VT032 pixel font from Google Fonts |
+| **Theme** | Dark blue-gray (`#0a0e17` bg, `#e0e0e0` text, `#00d4aa` accent) | **`#0B0C10`** background, **`#39FF14`** neon green, **`#FF003C`** red, high-contrast |
+| **Borders** | 1px rounded (8px border-radius), drop shadows | 2px solid brutalist, **zero border-radius, zero shadows** |
+| **Navigation** | Horizontal scrollable top bar (18 links) | Desktop: **left nav rail** (56px, scrollable, icon + 2-letter label). Mobile (≤480px): **fixed bottom app bar** (5 primary tabs + More...) |
+| **More overlay** | None | **Slide-up overlay** from bottom with remaining 13 panels + Report link. Toggled via `toggleMore()` / `closeMore()` |
+| **Mascot** | None | **ASCII visor** in header: `[ - _ - ]` idle, `[ o _ o ]` scan, `[ > _ < ]` attack, `[ $_$ ]` crack, `[ x _ x ]` dead. Driven by `updateMascot(state)` |
+| **Touch targets** | Inconsistent | **44px minimum** on all buttons, inputs, selectors, nav items |
+| **Touch feedback** | None | `:active` states on all interactive elements (border glow, background tint) |
+
+**Implementation**: Replaced CSS block (lines 618→), header + nav + main wrapper (lines 685→), added `.bar` + `.mo` HTML, added `updateMascot`, `toggleMore`, `closeMore` JS, updated `switchPanel` to handle both nav rail and bottom bar. All 54 existing JS functions preserved untouched (except switchPanel). 190 lines changed, `dce6940`, build clean 71% free.
 
 ### [2026-05-17] Advanced DEF CON Hardening
 

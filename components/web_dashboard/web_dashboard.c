@@ -223,12 +223,13 @@ static esp_err_t api_status_get(httpd_req_t *req)
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[512];
     int len = snprintf(buf, sizeof(buf),
-        "{\"heap_free\":%lu,\"heap_min\":%lu,\"uptime_ms\":%lld,\"wifi_mode\":%d,\"ws_clients\":%d}",
+        "{\"heap_free\":%lu,\"heap_min\":%lu,\"uptime_ms\":%lld,\"wifi_mode\":%d,\"ws_clients\":%d,\"camera\":%d}",
         esp_get_free_heap_size() / 1024,
         esp_get_minimum_free_heap_size() / 1024,
         esp_timer_get_time() / 1000,
         wifi_engine_get_mode(),
-        s_ws_count);
+        s_ws_count,
+        camera_engine_is_initialized() ? 1 : 0);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, len);
     return ESP_OK;
@@ -749,7 +750,17 @@ static const char DASHBOARD_HTML[] =
     "<div class='card' style='margin-top:12px'><h3>PMKID Hashes</h3><div id='hashesList'><div class='empty'>No hashes captured yet</div></div></div>"
     "</div>"
     "<div class='panel' id='panel-camera'>"
-    "<div class='card'><h3>Live Feed</h3><div style='text-align:center;padding:40px;color:#555'><p>Camera module not active</p><p style='font-size:12px;margin-top:8px'>MJPEG stream will appear here when camera is initialized</p></div></div>"
+    "<div class='card'><h3>Live Feed</h3>"
+    "<div id='camOff'><div class='empty'>Camera module not active</div>"
+    "<button class='btn btn-primary' onclick='initCamera()' style='width:100%'>Initialize Camera</button></div>"
+    "<div id='camOn' style='display:none'>"
+    "<img id='mjpegImg' src='/stream' style='width:100%;border:2px solid #1A1C2A;display:block'>"
+    "<div style='margin-top:4px;display:flex;gap:4px'>"
+    "<button class='btn btn-sm btn-danger' onclick='document.getElementById(\"mjpegImg\").src=\"/stream?\"+Date.now()' style='flex:1'>Restart Stream</button>"
+    "<button class='btn btn-sm btn-warn' onclick='openCameraFull()' style='flex:1'>Fullscreen</button>"
+    "</div></div>"
+    "<div id='camStatus' style='font-size:10px;color:#555;margin-top:4px'></div>"
+    "</div>"
     "</div>"
     "<div class='panel' id='panel-logs'>"
     "<div class='card'><h3>System Log</h3><button class='btn btn-sm btn-warn' onclick='document.getElementById(\"sysLog\").textContent=\"\"' style='margin-bottom:8px'>Clear</button><div class='log-viewer' id='sysLog'><div class='info'>Connecting...</div></div></div>"
@@ -1055,7 +1066,7 @@ static const char DASHBOARD_HTML[] =
     "if(name=='autopwn')updateMascot('attack');"
     "if(name=='logs')updateMascot('idle');"
     "if(name=='captures')updateMascot('idle');"
-    "if(name=='camera')updateMascot('scan');"
+    "if(name=='camera'){refreshCamera();updateMascot('scan')}"
     "if(name=='map')updateMascot('idle');"
     "}catch(e){console.error('switchPanel error:',e)}"
     "return false"
@@ -1084,6 +1095,21 @@ static const char DASHBOARD_HTML[] =
     "function stopAttack(){updateMascot('idle');"
     "fetch('/api/attack/stop',{method:'POST'});"
     "}"
+    "function refreshCamera(){"
+    "fetch('/api/status').then(function(r){return r.json()}).then(function(d){"
+    "var on=d.camera?1:0;"
+    "document.getElementById('camOff').style.display=on?'none':'block';"
+    "document.getElementById('camOn').style.display=on?'block':'none';"
+    "if(on){document.getElementById('mjpegImg').src='/stream?'+Date.now()}"
+    "});"
+    "}"
+    "function initCamera(){"
+    "fetch('/api/camera/init',{method:'POST'}).then(function(r){return r.json()}).then(function(d){"
+    "document.getElementById('camStatus').textContent=d.ok?'Camera initialized':'Init failed - no camera hardware?';"
+    "refreshCamera()"
+    "});"
+    "}"
+    "function openCameraFull(){window.open('/stream','_blank','width=640,height=480')}"
     "function refreshCaptures(){"
     "fetch('/api/captures/creds').then(function(r){return r.text()}).then(function(text){"
     "try{"
@@ -1631,6 +1657,32 @@ static esp_err_t api_auth_login(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── API: Camera Init (retry) ───────────────────── */
+
+static esp_err_t api_camera_init(httpd_req_t *req)
+{
+    if (auth_check(req) != ESP_OK) return ESP_OK;
+
+    esp_err_t r = ESP_OK;
+    if (!camera_engine_is_initialized()) {
+        r = camera_engine_init(NULL);
+        if (r == ESP_OK) {
+            camera_engine_start_stream();
+            ESP_LOGI(TAG, "Camera initialized via API");
+        } else {
+            ESP_LOGW(TAG, "Camera init via API failed: %s", esp_err_to_name(r));
+        }
+    }
+
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "{\"ok\":%s,\"camera\":%d}",
+        r == ESP_OK ? "true" : "false",
+        camera_engine_is_initialized() ? 1 : 0);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
 /* ── API: Diagnostics (no auth) ──────────────────── */
 
 static esp_err_t api_diag_get(httpd_req_t *req)
@@ -1681,6 +1733,7 @@ static const httpd_uri_t s_uris[] = {
     { .uri = "/api/config",       .method = HTTP_GET,  .handler = api_config_get },
     { .uri = "/api/config",       .method = HTTP_POST, .handler = api_config_post },
     { .uri = "/stream",           .method = HTTP_GET,  .handler = stream_mjpeg },
+    { .uri = "/api/camera/init",  .method = HTTP_POST, .handler = api_camera_init },
     { .uri = "/api/download",     .method = HTTP_GET,  .handler = download_handler },
     { .uri = "/api/responder/start",  .method = HTTP_POST, .handler = api_responder_start },
     { .uri = "/api/responder/stop",   .method = HTTP_POST, .handler = api_responder_stop },

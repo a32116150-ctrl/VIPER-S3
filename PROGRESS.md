@@ -1,6 +1,6 @@
 # VIPER-S3 Development Progress
 
-> **Current Status (May 17, 2026)**: Dashboard fully functional — **8 more bugs fixed today**. (1) `auth_check` return type (`httpd_req_get_hdr_value_str` returns `esp_err_t`, not `size_t`) caused 401 on every API → tab freeze; (2) `root_get_handler` bad recovery sent chunked framing on flushed connection → next request `"Header fields too long"` white screen — reverted to `ESP_FAIL`; (3) missing `POST /api/usb/payload/run` added; (4) `addAutopwnLog` double-append removed; (5) `DOMContentLoaded`→IIFE (event already fired); (6-8) three `})h` ASI syntax errors in `listPayloads`/`refreshTwins`/`refreshModels` — missing `;` before `h+='</table>'` → entire `<script>` block fails → `switchPanel` never defined. All 11 boot steps clean. HTTP on port 80. Auth `"viper"`.
+> **Current Status (May 17, 2026)**: Dashboard fully functional with **Cyber-Viper tactical terminal UI redesign**. VT323 pixel font, `#0B0C10` dark theme, `#39FF14` neon green / `#FF003C` red accents, brutalist 2px borders, zero border-radius, zero shadows. Left nav rail (desktop) → bottom app bar (mobile, ≤480px) with More... slide-up overlay for remaining tabs. Cyber-Viper ASCII mascot in header: `[ - _ - ]` idle → `[ o _ o ]` scan → `[ > _ < ]` attack → `[ $_$ ]` crack → `[ x _ x ]` dead. All 54 JS functions preserved. All 11 boot steps clean. HTTP on port 80. Auth `"viper"`. Commit `dce6940`.
 
 ## Phase 1 — Core Infrastructure ✅
 - `CMakeLists.txt`, `partitions.csv`, `sdkconfig.defaults`
@@ -8,9 +8,10 @@
 - `storage_manager/` — LittleFS, 9 dirs, cred/hash JSONL logging, wordlist iterator
 - `web_dashboard/` — ESP HTTP server, 27 REST endpoints, WebSocket, dark SPA
 
-## Current Status: Dashboard Fully Functional
--   **Firmware**: Compiles perfectly (`viper_s3.bin`), commit `8aef938`.
--   **8 Bugs Fixed Today (May 17)**: auth_check return type (all API got 401 → tab freeze); root_get_handler bad recovery (chunked framing on flushed connection → next request "Header fields too long"); missing /api/usb/payload/run; addAutopwnLog double-appendChild; DOMContentLoaded→IIFE; 3× `})h` ASI syntax errors (entire <script> block fails → switchPanel undefined → tabs unclickable). Dashboard now fully interactive.
+## Current Status: Dashboard Fully Functional — Cyber-Viper UI
+-   **Firmware**: Compiles perfectly (`viper_s3.bin`), commit `dce6940`.
+-   **UI Redesign (Cyber-Viper Tactical Terminal)**: VT323 pixel font, `#0B0C10`/#39FF14 dark neon theme, brutalist 2px borders. Left nav rail (desktop) + bottom app bar + More... slide-up overlay (mobile). ASCII visor mascot with 5 states. 44px touch targets. All 54 JS functions preserved. 190 lines changed, 0 build errors.
+-   **8 Bugs Fixed Earlier Today**: auth_check return type, root_get_handler bad recovery, missing /api/usb/payload/run, addAutopwnLog double-append, DOMContentLoaded→IIFE, 3× `})h` ASI syntax errors.
 -   **Hardware Stability**: Boot sequence clean; all 11 steps complete.
 
 ## Phase 2 — WiFi Engine ✅
@@ -134,6 +135,7 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
 - [x] **Fix white screen (root_get_handler)** — Return ESP_FAIL on PSRAM send failure (no recovery on flushed connection)
 - [x] **Add missing endpoint** — POST /api/usb/payload/run handler + URI entry
 - [x] **Fix addAutopwnLog** — Remove double appendChild
+- [x] **UI redesign: Cyber-Viper Tactical Terminal** — VT323 pixel font, dark neon theme, brutalist borders, left nav rail + bottom app bar + More... overlay, ASCII mascot (5 states), 44px touch targets
 - [ ] **Fix L6** — Verify WPA2-PSK works (code fix applied, needs WPA2 client hardware test)
 - [ ] **Test dashboard** — Verify http://192.168.4.1 loads, test all endpoints
 
