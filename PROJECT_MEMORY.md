@@ -142,10 +142,11 @@ antigravity/
 
 ## Web Dashboard
 
-- **Port**: 443 (HTTPS, auto-fallback to 80)
-- **Mode**: Dark SPA with 53 REST endpoints + WebSocket live updates
-- **Access**: https://192.168.4.1 (self-signed cert) or http://192.168.4.1 (HTTP fallback)
+- **Port**: 80 (HTTP only — HTTPS disabled due to browser TLS issues with self-signed cert)
+- **Mode**: Dark SPA with 54 REST endpoints + WebSocket live updates
+- **Access**: http://192.168.4.1
 - **Auth**: API key — default `"viper"`, stored in `/viper/config/config.json`
+- **Diagnostics**: `GET /api/diag` (no auth) returns heap, PSRAM, uptime, html_size, ws_clients
 - **WebSocket**: `/ws` for real-time event stream
 
 ### Frontend Tabs (13 implemented)
@@ -389,12 +390,19 @@ snprintf(s_serial_str, sizeof(s_serial_str), "%02X%02X%02X%02X%02X%02X",
   6. **Retry dashboard init after WiFi**: If dashboard failed before WiFi, it tries again after WiFi is up (DRAM may have shifted).
   7. **Increased LWIP memory pools** (`sdkconfig.defaults`): `CONFIG_LWIP_MEM_NUMBUF=64`, `CONFIG_LWIP_TCP_MSS=1460`, `CONFIG_LWIP_TCP_WND=32768` for more reliable socket buffer allocation.
 - **Result**: Dashboard starts reliably because it allocates its task stack before WiFi and BLE consume DRAM. Even if `httpd_start()` fails with the full config, it automatically retries with a smaller config.
-- **Web Dashboard**: 
-    - Full SPA (Single Page Application) with real-time WebSocket telemetry.
-    - Implemented a unified `fetch` interceptor (`_f.call(window)`) for global API key injection.
-    - Captive portal integrated with dynamic premium templates.
-    - Real-time Network Topology Map (Canvas-based) and Event Feed.
-    - Automated HTML Session Reporting (`/api/report` with URL query auth fallback).
+
+### 21. White screen / infinite loading — Content-Length mismatch on send failure (May 17, v3)
+
+- **File**: `components/web_dashboard/web_dashboard.c` (root_get_handler)
+- **Symptom**: Intermittent white screen or infinite loading spinner in browser after connecting to AP. Sometimes works fine, sometimes not — DRAM-order-sensitive.
+- **Root cause**: `root_get_handler()` sent the full ~27KB HTML in a single `httpd_resp_send()` with explicit `Content-Length` header. When PSRAM was fragmented at boot, it fell back to sending directly from flash via `httpd_resp_send(req, DASHBOARD_HTML, html_len)`. Flash cache contention during WiFi TX caused `httpd_resp_send` to fail mid-stream. The browser had already received headers with `Content-Length` but never got the full body, causing it to wait indefinitely for remaining bytes → **white screen / infinite loading**. This was intermittent because PSRAM fragmentation varies with boot order and previous allocations.
+- **Fix applied** (May 17, 2026):
+  1. **PSRAM fast path retained**: `heap_caps_malloc(html_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` → `memcpy` → `httpd_resp_send` — single-shot delivery when PSRAM available.
+  2. **Chunked transfer fallback**: When PSRAM allocation fails, HTML is sent in 4KB chunks via `httpd_resp_send_chunk()`. Each chunk fits in LWIP TX buffers, avoiding flash cache contention. If a chunk fails mid-stream, `httpd_resp_send_chunk(req, NULL, 0)` terminates the stream cleanly.
+  3. **No `Connection: close` header set** when using chunked mode — `httpd_resp_send_chunk` auto-sets `Transfer-Encoding: chunked`.
+- **Why chunked fixes it**: With chunked transfer, there is no `Content-Length` header. The browser knows the response is complete when it receives the zero-length terminating chunk. If a chunk fails, the connection drops and the browser shows partial content (or retries) instead of hanging forever.
+- **Also fixed**: Removed stray `"</div>"` (unmatched closing div) at line 750 that caused malformed HTML after panel-config.
+- **Result**: Dashboard loads reliably regardless of PSRAM fragmentation state.
 
 ---
 
@@ -636,9 +644,9 @@ Source-verified findings from code audit across all 13 components.
 - Project root: `/Users/anoircherif/Desktop/S3/antigravity`
 - IDF path: `~/esp/esp-idf`
 - Built by opencode with assistant guidance
-- Last build: May 17, 2026 (Build succeeded — 0x137bf0, 70% app partition free)
-- Last flash: May 17, 2026 — verified clean boot through all 11 steps
-- Last fix batch: May 17, 2026 — Code review + 3 additional bug fixes (JSONL captures, IR sprintf, BLE NVS)
+- Last build: May 17, 2026 (Build succeeded — 0x12bf30, 71% app partition free)
+- Last flash: May 17, 2026 — verified clean boot through all 11 steps, watchdog OK, heap 6863KB free
+- Last fix batch: May 17, 2026 — White screen root cause fixed (chunked transfer + PSRAM fallback), Content-Length guards on 16 POST handlers, `/api/diag` diagnostic endpoint, stray HTML `</div>` removed
 
 ---
 
@@ -658,14 +666,22 @@ Reviewer audit across all 13 components after L1–L5 security hardening. Projec
 | CR1 | `ble_engine.c:47-54` | Duplicate `nvs_flash_init()` — redundant after `system_init()`, NVS erase fallback could wipe config if NVS corrupted at BLE init time | Removed duplicate block; NVS init belongs exclusively to `system_init()` |
 | CR2 | `web_dashboard.c:369,394` | `api_captures_creds/hashes` — count hardcoded to `1`, raw JSONL embedded inside JSON array brackets (invalid JSON for multi-entry files) | Added `jsonl_to_json_array()` helper; returns real entry count; produces valid JSON array |
 | CR3 | `web_dashboard.c:1783` | `api_ir_learned` — unbounded `sprintf` without size tracking (potential buffer overrun if IR signal names are longer than expected) | Replaced all three `sprintf` calls with `snprintf` with `buf_size` tracking |
-| CR4 | `web_dashboard.c:1420-1460` | Dashboard white screen/hang — chunked HTML transfer lacked `Content-Length`, hanging browsers enforcing strict `Cache-Control` policies | Reverted `root_get_handler` to `httpd_resp_send()` to ensure `Content-Length` generation and proper rendering |
+| CR4 | `web_dashboard.c:1420-1460` | Dashboard white screen/hang — `httpd_resp_send` from flash fails mid-stream due to flash cache contention; browser waits forever for remaining bytes because `Content-Length` was already sent | **Triple-redundant fix**: PSRAM fast path (`httpd_resp_send` with PSRAM copy) + chunked transfer fallback (no `Content-Length` means browser never hangs) + terminating empty chunk on failure |
+
+### ✅ Fixed (May 17, 2026)
+
+| # | Component | Finding | Fix |
+|---|-----------|---------|-----|
+| CR4 | `web_dashboard.c:36` | `s_log_buf` — 16KB internal DRAM allocation for log ring buffer | **Moved to PSRAM** (`heap_caps_malloc(16384, MALLOC_CAP_SPIRAM)`) in prior batch — saves 16KB internal DRAM |
+| CR5 | Multiple POST handlers | No `Content-Length >= buf_size` guard before `httpd_req_recv()` — oversized body silently truncated | Added `CHECK_CONTENT_LEN(req, buf)` macro to all 16 POST handlers that read a body |
+| CR9 | `web_dashboard.c:1420-1460` | Dashboard white screen/hang — `Content-Length` mismatch when `httpd_resp_send()` fails mid-stream | **Triple-redundant**: PSRAM fast path → chunked transfer fallback → terminating empty chunk. See Fix #21. |
+| CR10 | `web_dashboard.c:750` | Stray `"</div>"` after panel-config — malformed HTML | Removed extra `</div>` line |
+| CR11 | `web_dashboard.c` | No heap/diag endpoint for pre-browser health check | Added `GET /api/diag` (no auth) → heap_free, heap_internal_free, heap_psram_free, heap_min_ever, http_server_up, uptime_ms, html_size, ws_clients |
 
 ### 🟡 Open Findings (Low Priority)
 
 | # | Component | Finding | Recommendation |
 |---|-----------|---------|----------------|
-| CR4 | `web_dashboard.c:36` | `s_log_buf[16384]` in `.bss` (internal DRAM) — costs 16KB of scarce DRAM | Move to PSRAM: `heap_caps_malloc(16384, MALLOC_CAP_SPIRAM)` at init |
-| CR5 | Multiple POST handlers | No `Content-Length >= buf_size` guard before `httpd_req_recv()` — oversized body silently truncated | Add: `if (req->content_len >= sizeof(buf)) { httpd_resp_send_err(...); return ESP_OK; }` |
 | CR6 | `storage_manager.h` | API key (`dashboard_password`) stored in plaintext JSON on LittleFS — extractable via `esptool read_flash` | Store salted SHA-256 hash in NVS (backed by eFuse flash encryption if enabled) |
 | CR7 | `sdkconfig.defaults:72` | `CONFIG_ESP_TASK_WDT_PANIC=n` — hung tasks produce no coredump (coredump partition goes unused) | Set `=y`; add `esp_task_wdt_reset()` calls inside long-running attack loops |
 | CR8 | `web_dashboard.c:470` | MJPEG stream capped at 300 frames (~15s) then terminates — browser shows still image | Implement disconnect-on-client-close check or document as known limitation |

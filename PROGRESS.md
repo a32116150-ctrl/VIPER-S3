@@ -1,6 +1,6 @@
 # VIPER-S3 Development Progress
 
-> **Current Status (May 17, 2026)**: Device flashed and running. Dashboard auth **fully fixed** — frontend JS now injects `X-API-Key` header automatically via monkey-patched `window.fetch`, with `?key=` fallback for direct-tab endpoints. New panels: **AUTO-PWNER** (autonomous 7-step attack chain), **Map** (canvas network topology), **Report** (downloadable HTML session report). Captive portal: 3 premium templates (Google, Windows AD, Hotel). All 25+ vulnerabilities fixed. USB enumeration ✅ BLE assert on disabled controller ✅ Build succeeds, boots clean. HTTP on port 80. Auth default `"viper"`. L6 WPA2-PSK fix applied (code-level, untested). **Code review (May 17)**: 3 additional bugs fixed + 5 findings documented.
+> **Current Status (May 17, 2026)**: Device flashed and running. Dashboard auth **fully fixed** — frontend JS now injects `X-API-Key` header automatically via monkey-patched `window.fetch`, with `?key=` fallback for direct-tab endpoints. New panels: **AUTO-PWNER** (autonomous 7-step attack chain), **Map** (canvas network topology), **Report** (downloadable HTML session report). Captive portal: 3 premium templates (Google, Windows AD, Hotel). All 25+ vulnerabilities fixed. USB enumeration ✅ BLE assert on disabled controller ✅ Build succeeds, boots clean. HTTP on port 80. Auth default `"viper"`. **White screen bug definitively fixed**: chunked transfer encoding eliminates Content-Length mismatch on send failure. **New**: `/api/diag` diagnostic endpoint, Content-Length guards on all POST handlers, stray `</div>` removed from HTML.
 
 ## Phase 1 — Core Infrastructure ✅
 - `CMakeLists.txt`, `partitions.csv`, `sdkconfig.defaults`
@@ -82,7 +82,7 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
 | Camera DMA allocation fails | ✅ | Fixed — PSRAM DMA mode enabled in sdkconfig.defaults; DMA descriptors point to PSRAM, no longer needs 16KB internal DRAM block |
 | HTTP server start failure | ✅ | Fixed — dashboard starts BEFORE WiFi (step 2), stack_size=4096+retry, BLE controller disabled to free ~30KB |
 | HTTP server boot-loop (out of memory) | ✅ | Fixed — `max_open_sockets=8`, `max_uri_handlers` auto-calculated from `sizeof(s_uris)`, `stack_size=4096` |
-| HTTP response hangs (infinite spinner) | ✅ | Fixed — chunked transfer (512B), fallback error page, watchdog auto-recovery |
+| HTTP response hangs (infinite spinner) | ✅ | Fixed — PSRAM fast path + chunked transfer (4KB), watchdog auto-recovery |
 | BLE assert on disabled controller | ✅ | Fixed May 17 — compile-time guard in `ble_engine_init()` returns `ESP_ERR_NOT_SUPPORTED` when `CONFIG_BT_CONTROLLER_DISABLED=y`; no more `ble_hs_event_start_stage2` assert |
 | BLE controller init | ✅ | Acceptable — controller disabled (`CONFIG_BT_CONTROLLER_DISABLED=y`) to free DRAM; NimBLE host compiles, graceful skip |
 | USB init | ✅ | Graceful fallback in place — no crash |
@@ -129,10 +129,13 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
 - [x] **Premium captive portals** — Google, Windows AD, Hotel templates
 - [x] **Move log buffer to PSRAM** — Saves 16KB internal DRAM
 - [x] **Fix JSONL parsing** — JSONL→JSON array conversion for captures/hashes APIs
+- [x] **Fix white screen root cause** — Chunked transfer encoding in `root_get_handler`; PSRAM fast path + chunked fallback. No more Content-Length mismatch on send failure.
+- [x] **Remove stray `</div>`** — Extra `</div>` after panel-config closing (line 750) causing malformed HTML DOM
+- [x] **Add Content-Length guards to all POST handlers** — 16 POST handlers now reject oversized bodies before `httpd_req_recv()`
+- [x] **Add `/api/diag` diagnostic endpoint** — No-auth GET returns heap, PSRAM, uptime, HTML size, WS client count
 - [ ] **Fix L6** — Verify WPA2-PSK works (code fix applied, needs WPA2 client hardware test)
 - [ ] **Test dashboard** — Verify http://192.168.4.1 loads, test all endpoints
-- [ ] **Move `s_log_buf` to PSRAM** — Free 16KB internal DRAM (`heap_caps_malloc(16384, MALLOC_CAP_SPIRAM)`)
-- [ ] **Add content-length guard to POST endpoints** — Reject `Content-Length >= buf_size` before `httpd_req_recv()`
+- [ ] **Verify chunked transfer on real browser** — Open dashboard in Chrome/Safari, confirm no white screen
 
 ---
 

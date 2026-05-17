@@ -306,6 +306,7 @@ static esp_err_t api_attack_start(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[256];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -513,6 +514,7 @@ static esp_err_t api_config_post(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[2048];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -746,7 +748,6 @@ static const char DASHBOARD_HTML[] =
     "<div class='card'><h3>Device Configuration</h3>"
     "<button class='btn btn-primary btn-sm' onclick='loadConfig()' style='margin-bottom:8px'>Refresh</button>"
     "<div id='configForm'><div class='empty'>Click Refresh or switch to Config tab</div></div></div>"
-    "</div>"
     "</div>"
 
     "<div class='panel' id='panel-ir'>"
@@ -1419,42 +1420,56 @@ static const char DASHBOARD_HTML[] =
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     size_t html_len = sizeof(DASHBOARD_HTML) - 1;
-    uint32_t free_pre = esp_get_free_heap_size();
 
-    ESP_LOGI(TAG, "Serving dashboard HTML (%u bytes) — heap free: %lu KB",
-             html_len, free_pre / 1024);
+    ESP_LOGI(TAG, "Serving dashboard HTML (%u bytes)", html_len);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
     httpd_resp_set_hdr(req, "Pragma", "no-cache");
     httpd_resp_set_hdr(req, "Expires", "0");
-    httpd_resp_set_hdr(req, "Connection", "close");
 
-    /* Allocate from PSRAM to prevent SPI flash contention during large Wi-Fi send */
+    /* Try PSRAM copy + single httpd_resp_send (fast path — avoids flash cache contention) */
     char *buf = heap_caps_malloc(html_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    esp_err_t err;
-
     if (buf) {
         memcpy(buf, DASHBOARD_HTML, html_len);
-        err = httpd_resp_send(req, buf, html_len);
+        esp_err_t err = httpd_resp_send(req, buf, html_len);
         heap_caps_free(buf);
-    } else {
-        ESP_LOGW(TAG, "PSRAM full, sending dashboard from flash");
-        err = httpd_resp_send(req, DASHBOARD_HTML, html_len);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Dashboard served from PSRAM (%u bytes)", html_len);
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "httpd_resp_send from PSRAM failed: %s — headers may be corrupt, returning error",
+                 esp_err_to_name(err));
+        return ESP_FAIL;
     }
 
-    uint32_t free_post = esp_get_free_heap_size();
-    ESP_LOGI(TAG, "Dashboard served: %s (%u bytes) — heap: %lu->%lu KB",
-             err == ESP_OK ? "OK" : "FAIL",
-             html_len, free_pre / 1024, free_post / 1024);
+    ESP_LOGW(TAG, "PSRAM OOM (%u bytes), using chunked transfer", html_len);
 
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send dashboard HTML: %s", esp_err_to_name(err));
-        /* Do NOT send a fallback here! The headers are already sent. 
-           Sending a fallback string will corrupt the HTTP stream and cause infinite loading. */
+    /* Chunked fallback: send in 4KB chunks from flash.
+     * httpd_resp_send_chunk automatically sets Transfer-Encoding: chunked.
+     * Each chunk fits in LWIP buffers so flash reads are short — avoids the
+     * Content-Length mismatch that causes infinite loading when a single
+     * httpd_resp_send() fails mid-stream due to flash cache contention. */
+    const size_t chunk_size = 4096;
+    const char *ptr = DASHBOARD_HTML;
+    size_t remaining = html_len;
+
+    while (remaining > 0) {
+        size_t send_now = remaining > chunk_size ? chunk_size : remaining;
+        esp_err_t err = httpd_resp_send_chunk(req, ptr, send_now);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Chunk failed at offset %u: %s",
+                     (unsigned)(ptr - DASHBOARD_HTML), esp_err_to_name(err));
+            httpd_resp_send_chunk(req, NULL, 0);
+            return ESP_FAIL;
+        }
+        ptr += send_now;
+        remaining -= send_now;
     }
 
-    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+    httpd_resp_send_chunk(req, NULL, 0);
+    ESP_LOGI(TAG, "Dashboard served via chunked transfer (%u bytes)", html_len);
+    return ESP_OK;
 }
 
 /* ── Simple ping endpoint ────────────────────────── */
@@ -1517,6 +1532,7 @@ static esp_err_t api_report(httpd_req_t *req);
 static esp_err_t api_auth_login(httpd_req_t *req)
 {
     char buf[128];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -1544,11 +1560,42 @@ static esp_err_t api_auth_login(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── API: Diagnostics (no auth) ──────────────────── */
+
+static esp_err_t api_diag_get(httpd_req_t *req)
+{
+    char buf[512];
+    int len = snprintf(buf, sizeof(buf),
+        "{"
+        "\"heap_free\":%lu,"
+        "\"heap_internal_free\":%lu,"
+        "\"heap_psram_free\":%lu,"
+        "\"heap_min_ever\":%lu,"
+        "\"http_server_up\":%d,"
+        "\"uptime_ms\":%lld,"
+        "\"html_size\":%u,"
+        "\"ws_clients\":%d"
+        "}",
+        (unsigned long)esp_get_free_heap_size(),
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        (unsigned long)esp_get_minimum_free_heap_size(),
+        s_server != NULL,
+        (long long)(esp_timer_get_time() / 1000),
+        (unsigned)sizeof(DASHBOARD_HTML) - 1,
+        s_ws_count);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
 /* ── URI Registration ───────────────────────────── */
 
 static const httpd_uri_t s_uris[] = {
     { .uri = "/",         .method = HTTP_GET,    .handler = root_get_handler },
     { .uri = "/ping",     .method = HTTP_GET,    .handler = ping_get_handler },
+    { .uri = "/api/diag", .method = HTTP_GET,    .handler = api_diag_get },
     { .uri = "/ws",       .method = HTTP_GET,    .handler = ws_handler, .is_websocket = true },
     { .uri = "/api/auth", .method = HTTP_POST,   .handler = api_auth_login },
     { .uri = "/api/status",       .method = HTTP_GET,  .handler = api_status_get },
@@ -1765,6 +1812,7 @@ static esp_err_t api_responder_start(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len > 0) buf[len] = '\0';
 
@@ -1832,6 +1880,7 @@ static esp_err_t api_crack_start(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[512];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -1895,6 +1944,7 @@ static esp_err_t api_downgrade_start(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len > 0) buf[len] = '\0';
 
@@ -1915,6 +1965,7 @@ static esp_err_t api_canary_create(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[256];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -2024,6 +2075,7 @@ static esp_err_t api_ble_mitm_start(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[256];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len > 0) buf[len] = '\0';
 
@@ -2142,6 +2194,7 @@ static esp_err_t api_ir_send(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[128];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -2241,6 +2294,7 @@ static esp_err_t api_usb_type(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[512];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -2275,6 +2329,7 @@ static esp_err_t api_usb_ducky(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[2048];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -2360,6 +2415,7 @@ static esp_err_t api_ai_twins_delete(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -2378,6 +2434,7 @@ static esp_err_t api_ai_twins_spawn(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[128];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -2399,6 +2456,7 @@ static esp_err_t api_ai_twins_spawn_all(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
@@ -2465,6 +2523,7 @@ static esp_err_t api_orch_chain_run(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len > 0) buf[len] = '\0';
 
@@ -2493,6 +2552,7 @@ static esp_err_t api_orch_schedule(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
+    CHECK_CONTENT_LEN(req, buf);
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
     buf[len] = '\0';
