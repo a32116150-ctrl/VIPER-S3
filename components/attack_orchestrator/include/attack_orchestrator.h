@@ -9,6 +9,7 @@ typedef enum {
     CHAIN_PLUG_AND_PWN,
     CHAIN_CONFERENCE_RECON,
     CHAIN_BLE_MITM,
+    CHAIN_AUTO_PWNER,      /* DEF CON: full autonomous attack pipeline */
     CHAIN_CUSTOM,
 } attack_chain_t;
 

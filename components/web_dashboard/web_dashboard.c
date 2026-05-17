@@ -33,13 +33,25 @@ static int s_ws_fds[MAX_WS_CLIENTS];
 static int s_ws_count = 0;
 static SemaphoreHandle_t s_ws_mutex = NULL;
 
-static char s_log_buf[16384];
+#define LOG_BUF_SIZE 16384
+static char *s_log_buf = NULL;   /* Allocated from PSRAM at init — saves 16KB internal DRAM */
 static size_t s_log_len = 0;
 
 #define API_KEY_MAX_LEN 64
 #define DASHBOARD_DEFAULT_PASSWORD "viper"
 static char s_api_key[API_KEY_MAX_LEN] = {0};
 static bool s_auth_enabled = false;
+
+/* Reject oversized POST bodies before reading */
+#define CHECK_CONTENT_LEN(req, buf) \
+    do { \
+        if ((req)->content_len >= sizeof(buf)) { \
+            httpd_resp_set_type((req), "application/json"); \
+            httpd_resp_set_status((req), "413 Payload Too Large"); \
+            httpd_resp_sendstr((req), "{\"ok\":false,\"error\":\"body too large\"}"); \
+            return ESP_OK; \
+        } \
+    } while (0)
 
 static void load_api_key(void)
 {
@@ -92,13 +104,23 @@ static esp_err_t auth_check(httpd_req_t *req)
     if (!s_auth_enabled) return ESP_OK;
     char buf[API_KEY_MAX_LEN + 8] = {0};
     size_t len = httpd_req_get_hdr_value_str(req, "X-API-Key", buf, sizeof(buf) - 1);
-    if (len == 0 || strcmp(buf, s_api_key) != 0) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_set_status(req, "401 Unauthorized");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
-        return ESP_FAIL;
+    
+    if (len > 0 && strcmp(buf, s_api_key) == 0) {
+        return ESP_OK;
     }
-    return ESP_OK;
+    
+    /* Fallback to query parameter for endpoints like /api/report opened in new tabs */
+    char query[128] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "key", buf, sizeof(buf)) == ESP_OK) {
+            if (strcmp(buf, s_api_key) == 0) return ESP_OK;
+        }
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
+    return ESP_FAIL;
 }
 
 /* ── WebSocket helpers ──────────────────────────── */
@@ -152,13 +174,15 @@ static void dashboard_log(const char *fmt, ...)
     vsnprintf(line, sizeof(line), fmt, args);
     va_end(args);
 
-    size_t llen = strlen(line);
-    if (s_log_len + llen + 1 > sizeof(s_log_buf)) {
-        size_t remove = s_log_len / 4;
-        memmove(s_log_buf, s_log_buf + remove, s_log_len - remove);
-        s_log_len -= remove;
+    if (s_log_buf) {
+        size_t llen = strlen(line);
+        if (s_log_len + llen + 1 > LOG_BUF_SIZE) {
+            size_t remove = s_log_len / 4;
+            memmove(s_log_buf, s_log_buf + remove, s_log_len - remove);
+            s_log_len -= remove;
+        }
+        s_log_len += snprintf(s_log_buf + s_log_len, LOG_BUF_SIZE - s_log_len, "%s\n", line);
     }
-    s_log_len += snprintf(s_log_buf + s_log_len, sizeof(s_log_buf) - s_log_len, "%s\n", line);
 
     web_dashboard_broadcast("log", line);
 }
@@ -349,14 +373,49 @@ static esp_err_t api_attack_stop(httpd_req_t *req)
 
 /* ── API: Captures ──────────────────────────────── */
 
+/* Convert JSONL (newline-delimited JSON objects) to a JSON array in-place.
+ * Returns the number of entries found. Writes into out (size out_size). */
+static int jsonl_to_json_array(const char *jsonl, char *out, size_t out_size)
+{
+    int count = 0;
+    size_t off = 0;
+    off += snprintf(out + off, out_size - off, "[");
+
+    const char *p = jsonl;
+    while (p && *p) {
+        /* Skip blank lines */
+        while (*p == '\n' || *p == '\r') p++;
+        if (!*p) break;
+
+        /* Find end of this JSONL line */
+        const char *eol = strpbrk(p, "\n\r");
+        size_t line_len = eol ? (size_t)(eol - p) : strlen(p);
+        if (line_len == 0) { p = eol ? eol + 1 : NULL; continue; }
+
+        if (count > 0 && off < out_size - 1)
+            out[off++] = ',';
+
+        size_t copy = (off + line_len < out_size - 2) ? line_len : out_size - off - 2;
+        memcpy(out + off, p, copy);
+        off += copy;
+        count++;
+
+        p = eol ? eol + 1 : NULL;
+    }
+
+    if (off < out_size - 1) out[off++] = ']';
+    if (off < out_size)     out[off]   = '\0';
+    return count;
+}
+
 static esp_err_t api_captures_creds(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
-    uint8_t *buf = malloc(8192);
+    char *buf = malloc(8192);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
     size_t len = 0;
-    esp_err_t ret = storage_read_file(FILE_CREDS, buf, 8191, &len);
-    if (ret != ESP_OK) {
+    esp_err_t ret = storage_read_file(FILE_CREDS, (uint8_t *)buf, 8191, &len);
+    if (ret != ESP_OK || len == 0) {
         free(buf);
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"count\":0,\"entries\":[]}");
@@ -364,12 +423,18 @@ static esp_err_t api_captures_creds(httpd_req_t *req)
     }
     buf[len] = '\0';
 
-    char *resp = malloc(len + 128);
-    if (!resp) { free(buf); httpd_resp_send_500(req); return ESP_OK; }
-    int rlen = snprintf(resp, len + 128, "{\"count\":%zu,\"entries\":[%s]}", 1, (char *)buf);
+    /* Convert JSONL → JSON array */
+    char *arr = malloc(len + 32);
+    if (!arr) { free(buf); httpd_resp_send_500(req); return ESP_OK; }
+    int count = jsonl_to_json_array(buf, arr, len + 32);
+
+    char *resp = malloc(len + 64);
+    if (!resp) { free(arr); free(buf); httpd_resp_send_500(req); return ESP_OK; }
+    int rlen = snprintf(resp, len + 64, "{\"count\":%d,\"entries\":%s}", count, arr);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, rlen);
     free(resp);
+    free(arr);
     free(buf);
     return ESP_OK;
 }
@@ -377,11 +442,11 @@ static esp_err_t api_captures_creds(httpd_req_t *req)
 static esp_err_t api_captures_hashes(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
-    uint8_t *buf = malloc(8192);
+    char *buf = malloc(8192);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
     size_t len = 0;
-    esp_err_t ret = storage_read_file(FILE_HASHES, buf, 8191, &len);
-    if (ret != ESP_OK) {
+    esp_err_t ret = storage_read_file(FILE_HASHES, (uint8_t *)buf, 8191, &len);
+    if (ret != ESP_OK || len == 0) {
         free(buf);
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"count\":0,\"entries\":[]}");
@@ -389,12 +454,17 @@ static esp_err_t api_captures_hashes(httpd_req_t *req)
     }
     buf[len] = '\0';
 
-    char *resp = malloc(len + 128);
-    if (!resp) { free(buf); httpd_resp_send_500(req); return ESP_OK; }
-    int rlen = snprintf(resp, len + 128, "{\"count\":%zu,\"entries\":[%s]}", 1, (char *)buf);
+    char *arr = malloc(len + 32);
+    if (!arr) { free(buf); httpd_resp_send_500(req); return ESP_OK; }
+    int count = jsonl_to_json_array(buf, arr, len + 32);
+
+    char *resp = malloc(len + 64);
+    if (!resp) { free(arr); free(buf); httpd_resp_send_500(req); return ESP_OK; }
+    int rlen = snprintf(resp, len + 64, "{\"count\":%d,\"entries\":%s}", count, arr);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, rlen);
     free(resp);
+    free(arr);
     free(buf);
     return ESP_OK;
 }
@@ -415,7 +485,7 @@ static esp_err_t api_logs_get(httpd_req_t *req)
 {
     if (auth_check(req) != ESP_OK) return ESP_OK;
     httpd_resp_set_type(req, "text/plain");
-    httpd_resp_send(req, s_log_buf, s_log_len);
+    httpd_resp_send(req, s_log_buf ? s_log_buf : "", s_log_buf ? s_log_len : 0);
     return ESP_OK;
 }
 
@@ -604,6 +674,11 @@ static const char DASHBOARD_HTML[] =
     ".modal-content{background:#1a2a3a;border-radius:12px;padding:24px;max-width:480px;width:90%;max-height:80vh;overflow-y:auto}"
     ".modal-content h2{color:#00d4aa;margin-bottom:16px}"
     "@media(max-width:600px){.header h1{font-size:16px}.cards{grid-template-columns:1fr 1fr}.nav a{padding:10px 12px;font-size:12px}}"
+    ".step-badge{padding:6px 12px;border-radius:20px;font-size:11px;font-weight:600;background:#1a2a3a;color:#555;border:1px solid #2a3a4a;transition:all .3s}"
+    ".step-badge.active{background:#3a1a00;color:#ffaa00;border-color:#ffaa00;box-shadow:0 0 8px rgba(255,170,0,.3);animation:stepPulse 1s infinite}"
+    ".step-badge.done{background:#0a2a1a;color:#00d4aa;border-color:#00d4aa}"
+    ".step-badge.cracked{background:#2a0a0a;color:#ff4444;border-color:#ff4444;box-shadow:0 0 12px rgba(255,68,68,.4);animation:stepPulse .5s infinite}"
+    "@keyframes stepPulse{0%,100%{opacity:1}50%{opacity:.6}}"
     "</style></head><body>"
     "<div class='header'>"
     "<h1>VIPER<span>-S3</span></h1>"
@@ -626,6 +701,9 @@ static const char DASHBOARD_HTML[] =
     "<a href='#' data-panel='usb' onclick='return switchPanel(\"usb\")'>USB</a>"
     "<a href='#' data-panel='ai' onclick='return switchPanel(\"ai\")'>AI</a>"
     "<a href='#' data-panel='orchestrator' onclick='return switchPanel(\"orchestrator\")'>Orch</a>"
+    "<a href='#' data-panel='autopwn' onclick='return switchPanel(\"autopwn\")' style='color:#ff4444;font-weight:700'>&#x26A1; AUTO-PWNER</a>"
+    "<a href='#' data-panel='map' onclick='return switchPanel(\"map\")'>&#x1f5fa; Map</a>"
+    "<a href='#' onclick='window.open(\"/api/report?key=\"+(localStorage.getItem(\"viper_key\")||\"viper\"));return false;' style='color:#ffaa00'>&#x1f4cb; Report</a>"
     "</div>"
     "<div class='main' id='main'>"
     "<div class='panel active' id='panel-overview'>"
@@ -757,6 +835,53 @@ static const char DASHBOARD_HTML[] =
     "</div>"
     "</div>"
 
+    /* ── AUTO-PWNER Panel ── */
+    "<div class='panel' id='panel-autopwn'>"
+    "<div class='card' style='border-color:#ff4444;background:linear-gradient(135deg,#1a0a0a,#111b24)'>"
+    "<h3 style='color:#ff4444'>&#x26A1; AUTO-PWNER — Autonomous Attack Chain</h3>"
+    "<p style='color:#888;font-size:12px;margin-bottom:16px'>"
+    "Fully autonomous: scan &rarr; PMKID &rarr; deauth &rarr; evil twin (hotel portal) &rarr; capture creds &rarr; auto-crack"
+    "</p>"
+    "<div style='margin-bottom:16px'>"
+    "<button class='btn btn-danger' id='autopwnBtn' onclick='startAutoPwner()'>&#x26A1; LAUNCH AUTO-PWNER</button>"
+    "<button class='btn btn-warn btn-sm' onclick='stopChain()' style='margin-left:8px'>Stop</button>"
+    "</div>"
+    "<div id='autopwnSteps' style='margin-bottom:16px'>"
+    "<div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px'>"
+    "<span class='step-badge' id='step-scan'>&#x1f50d; Scan</span>"
+    "<span class='step-badge' id='step-pmkid'>&#x1f512; PMKID</span>"
+    "<span class='step-badge' id='step-deauth'>&#x26a1; Deauth</span>"
+    "<span class='step-badge' id='step-evil_twin'>&#x1f608; Evil Twin</span>"
+    "<span class='step-badge' id='step-harvest'>&#x1f3af; Harvest</span>"
+    "<span class='step-badge' id='step-crack'>&#x1f513; Crack</span>"
+    "</div>"
+    "</div>"
+    "<div class='log-viewer' id='autopwnLog' style='height:300px'><div class='info'>Waiting to start...</div></div>"
+    "</div>"
+    "<div class='cards' style='margin-top:12px'>"
+    "<div class='card'><h3>Captured Creds</h3><div class='value red' id='autopwnCredCount'>0</div></div>"
+    "<div class='card'><h3>Cracked</h3><div class='value green' id='autopwnCrackedCount'>0</div></div>"
+    "<div class='card'><h3>Clients Seen</h3><div class='value yellow' id='autopwnClientCount'>0</div></div>"
+    "<div class='card'><h3>Last Cracked PW</h3><div class='value green' id='autopwnLastPw' style='font-size:18px'>-</div></div>"
+    "</div>"
+    "</div>"
+
+    /* ── Map Panel (Canvas network topology) ── */
+    "<div class='panel' id='panel-map'>"
+    "<div class='card'>"
+    "<h3>&#x1f5fa; Live Network Topology</h3>"
+    "<div style='display:flex;gap:8px;margin-bottom:8px;font-size:11px;color:#888'>"
+    "<span style='color:#00d4aa'>&#x25cf;</span> VIPER-S3 &nbsp;"
+    "<span style='color:#4488ff'>&#x25cf;</span> Access Point &nbsp;"
+    "<span style='color:#ffaa00'>&#x25cf;</span> Client &nbsp;"
+    "<span style='color:#ff4444'>&#x25cf;</span> Targeted"
+    "</div>"
+    "<canvas id='topoCanvas' width='800' height='500' "
+    "style='width:100%;background:#050810;border-radius:6px;border:1px solid #1a2a3a;cursor:crosshair'></canvas>"
+    "<div style='margin-top:8px;font-size:11px;color:#555'>Click canvas to refresh &bull; Updates via WebSocket</div>"
+    "</div>"
+    "</div>"
+
     "<div class='panel' id='panel-responder'>"
     "<div class='cards'>"
     "<div class='card'><h3>LLMNR/NBT-NS/mDNS Poisoner</h3>"
@@ -818,6 +943,15 @@ static const char DASHBOARD_HTML[] =
 
     "<script>"
     "console.log('VIPER-S3 JS loaded');"
+    "var _f=window.fetch;"
+    "window.fetch=function(u,opts){"
+    "opts=opts||{};opts.headers=opts.headers||{};"
+    "opts.headers['X-API-Key']=localStorage.getItem('viper_key')||'viper';"
+    "return _f.call(window,u,opts).then(function(r){"
+    "if(r.status===401){var k=prompt('API Key required:');if(k){localStorage.setItem('viper_key',k);location.reload()}}"
+    "return r;"
+    "});"
+    "};"
     "let ws=null;let logLines=[];"
     "function connectWS(){"
     "ws=new WebSocket('ws://'+location.host+'/ws');"
@@ -1162,6 +1296,122 @@ static const char DASHBOARD_HTML[] =
     "function stopSchedule(){"
     "fetch('/api/orchestrator/schedule/stop',{method:'POST'})"
     "}"
+    /* AUTO-PWNER JavaScript */
+    "var autopwnCredCount=0,autopwnCrackedCount=0,autopwnClientCount=0;"
+    "function startAutoPwner(){"
+    "if(!confirm('Launch AUTO-PWNER? This will actively attack networks in range.'))return;"
+    "var btn=document.getElementById('autopwnBtn');"
+    "btn.disabled=true;btn.textContent='Running...';"
+    "var steps=['scan','pmkid','deauth','evil_twin','harvest','crack'];"
+    "steps.forEach(function(s){var el=document.getElementById('step-'+s);if(el){el.className='step-badge';} });"
+    "autopwnCredCount=0;autopwnCrackedCount=0;autopwnClientCount=0;"
+    "document.getElementById('autopwnCredCount').textContent='0';"
+    "document.getElementById('autopwnCrackedCount').textContent='0';"
+    "document.getElementById('autopwnClientCount').textContent='0';"
+    "document.getElementById('autopwnLastPw').textContent='-';"
+    "addAutopwnLog('\\u26A1 AUTO-PWNER launched','warn');"
+    "fetch('/api/orchestrator/chain/run',{method:'POST',body:JSON.stringify({chain:5})});"
+    "}"
+    "function addAutopwnLog(msg,cls){"
+    "var el=document.getElementById('autopwnLog');"
+    "if(!el)return;"
+    "var d=document.createElement('div');"
+    "d.className=cls||'info';"
+    "d.textContent='['+new Date().toLocaleTimeString()+'] '+msg;"
+    "el.appendChild(d);"
+    "el.scrollTop=el.scrollHeight;"
+    "if(el.children.length===1&&el.children[0].textContent==='Waiting to start...')el.innerHTML='';"
+    "el.appendChild(d);el.scrollTop=el.scrollHeight;"
+    "}"
+    /* Topology canvas engine */
+    "var topoNodes=[];var topoLinks=[];"
+    "function drawTopology(){"
+    "var cv=document.getElementById('topoCanvas');if(!cv)return;"
+    "var ctx=cv.getContext('2d');"
+    "var W=cv.width,H=cv.height;"
+    "ctx.clearRect(0,0,W,H);"
+    /* Grid */
+    "ctx.strokeStyle='#0d1520';ctx.lineWidth=1;"
+    "for(var gx=0;gx<W;gx+=40){ctx.beginPath();ctx.moveTo(gx,0);ctx.lineTo(gx,H);ctx.stroke();}"
+    "for(var gy=0;gy<H;gy+=40){ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(W,gy);ctx.stroke();}"
+    /* VIPER-S3 center node */
+    "var cx=W/2,cy=H/2;"
+    "ctx.shadowBlur=20;ctx.shadowColor='#00d4aa';"
+    "ctx.beginPath();ctx.arc(cx,cy,18,0,Math.PI*2);"
+    "ctx.fillStyle='#00d4aa';ctx.fill();"
+    "ctx.shadowBlur=0;"
+    "ctx.fillStyle='#0a0e17';ctx.font='bold 10px monospace';ctx.textAlign='center';ctx.textBaseline='middle';"
+    "ctx.fillText('VIPER',cx,cy);"
+    /* Draw APs */
+    "topoNodes.forEach(function(n,i){"
+    "var angle=(i/Math.max(topoNodes.length,1))*Math.PI*2-Math.PI/2;"
+    "var r=n.targeted?130:160;"
+    "var nx=cx+r*Math.cos(angle),ny=cy+r*Math.sin(angle);"
+    "n._x=nx;n._y=ny;"
+    /* Connection line */
+    "ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(nx,ny);"
+    "ctx.strokeStyle=n.targeted?'rgba(255,68,68,.6)':'rgba(68,136,255,.2)';"
+    "ctx.lineWidth=n.targeted?2:1;ctx.setLineDash(n.targeted?[4,4]:[]);ctx.stroke();ctx.setLineDash([]);"
+    /* AP circle */
+    "ctx.shadowBlur=n.targeted?15:0;ctx.shadowColor='#ff4444';"
+    "ctx.beginPath();ctx.arc(nx,ny,12,0,Math.PI*2);"
+    "ctx.fillStyle=n.targeted?'#ff4444':'#4488ff';ctx.fill();"
+    "ctx.shadowBlur=0;"
+    /* Label */
+    "ctx.fillStyle='#ccc';ctx.font='9px monospace';ctx.textAlign='center';ctx.textBaseline='top';"
+    "ctx.fillText(n.ssid&&n.ssid.length>10?n.ssid.substring(0,10)+'..':n.ssid||'AP',nx,ny+14);"
+    "ctx.fillStyle='#555';ctx.fillText('ch'+n.ch+' '+n.rssi+'dBm',nx,ny+24);"
+    "});"
+    "}"
+    "function topoAddAp(ssid,ch,rssi,targeted){"
+    "var ex=topoNodes.findIndex(function(n){return n.ssid===ssid});;"
+    "if(ex>=0){topoNodes[ex].rssi=rssi;topoNodes[ex].targeted=targeted;}else{"
+    "topoNodes.push({ssid:ssid,ch:ch,rssi:rssi,targeted:targeted||false});}"
+    "drawTopology();"
+    "}"
+    "document.addEventListener('DOMContentLoaded',function(){"
+    "var cv=document.getElementById('topoCanvas');"
+    "if(cv){cv.addEventListener('click',function(){drawTopology();});}"
+    "});"
+    /* WebSocket event handler additions for autopwn/cracked */
+    "function handleWsMessage(evt){"
+    "try{var msg=JSON.parse(evt.data);}catch(e){return;}"
+    "if(msg.type==='autopwn'){"
+    "var d=typeof msg.data==='string'?JSON.parse(msg.data):msg.data;"
+    "var step=d.step,status=d.status;"
+    "addAutopwnLog(step+': '+status+(d.ssid?' ['+d.ssid+']':'')+(d.found?' found='+d.found:''),status==='active'?'warn':status==='done'?'cred':'info');"
+    "var el=document.getElementById('step-'+step);"
+    "if(el){el.className='step-badge '+(status==='active'?'active':status==='done'?'done':'info');}"
+    "if(d.count){document.getElementById('autopwnClientCount').textContent=d.count;autopwnClientCount=d.count;}"
+    "if(status==='captured'){autopwnCredCount++;document.getElementById('autopwnCredCount').textContent=autopwnCredCount;}"
+    "if(step==='scan'&&status==='done'){topoNodes=[];}"
+    "if(d.ssid&&step==='target'){topoAddAp(d.ssid,d.ch,d.rssi,true);}"
+    "}"
+    "if(msg.type==='cracked'){"
+    "var d=typeof msg.data==='string'?JSON.parse(msg.data):msg.data;"
+    "autopwnCrackedCount++;document.getElementById('autopwnCrackedCount').textContent=autopwnCrackedCount;"
+    "document.getElementById('autopwnLastPw').textContent=d.password||'?';"
+    "addAutopwnLog('\\u{1f513} CRACKED! Hash: '+d.hash+' Password: '+d.password,'cred');"
+    "var el=document.getElementById('step-crack');if(el)el.className='step-badge cracked';"
+    "}"
+    "if(msg.type==='chain'){"
+    "var d=typeof msg.data==='string'?JSON.parse(msg.data):msg.data;"
+    "if(d.status==='done'){"
+    "var btn=document.getElementById('autopwnBtn');"
+    "if(btn){btn.disabled=false;btn.textContent='\u26A1 LAUNCH AUTO-PWNER';}"
+    "addAutopwnLog('Chain complete: '+d.name,'info');"
+    "}"
+    "}"
+    "}"
+    /* Extend existing WS onmessage */
+    "var _origWsMsg=null;"
+    "function initTopoWs(){"
+    "if(typeof ws!=='undefined'&&ws&&ws.onmessage){"
+    "_origWsMsg=ws.onmessage;"
+    "ws.onmessage=function(e){if(_origWsMsg)_origWsMsg(e);handleWsMessage(e);};"
+    "}else{setTimeout(initTopoWs,500);}"
+    "}"
+    "setTimeout(initTopoWs,1000);"
     "</script></body></html>";
 
 /* ── Root handler ───────────────────────────────── */
@@ -1170,51 +1420,38 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 {
     size_t html_len = sizeof(DASHBOARD_HTML) - 1;
     uint32_t free_pre = esp_get_free_heap_size();
-    uint32_t free_block_pre = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
 
-    ESP_LOGI(TAG, "Serving dashboard HTML (%u bytes) — heap free: %lu KB, largest block: %lu",
-             html_len, free_pre / 1024, free_block_pre);
+    ESP_LOGI(TAG, "Serving dashboard HTML (%u bytes) — heap free: %lu KB",
+             html_len, free_pre / 1024);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+    httpd_resp_set_hdr(req, "Pragma", "no-cache");
+    httpd_resp_set_hdr(req, "Expires", "0");
+    httpd_resp_set_hdr(req, "Connection", "close");
 
-    /* Try chunked send — avoids large stack allocation for buffer */
-    const char *ptr = DASHBOARD_HTML;
-    size_t remaining = html_len;
-    esp_err_t err = ESP_OK;
+    /* Allocate from PSRAM to prevent SPI flash contention during large Wi-Fi send */
+    char *buf = heap_caps_malloc(html_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    esp_err_t err;
 
-    while (remaining > 0) {
-        size_t chunk = remaining > 512 ? 512 : remaining;
-        err = httpd_resp_send_chunk(req, ptr, chunk);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Chunk send failed at offset %u: %s",
-                     (unsigned)(ptr - DASHBOARD_HTML), esp_err_to_name(err));
-            break;
-        }
-        ptr += chunk;
-        remaining -= chunk;
-    }
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, NULL, 0);
+    if (buf) {
+        memcpy(buf, DASHBOARD_HTML, html_len);
+        err = httpd_resp_send(req, buf, html_len);
+        heap_caps_free(buf);
+    } else {
+        ESP_LOGW(TAG, "PSRAM full, sending dashboard from flash");
+        err = httpd_resp_send(req, DASHBOARD_HTML, html_len);
     }
 
-    uint32_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
     uint32_t free_post = esp_get_free_heap_size();
-    ESP_LOGI(TAG, "Dashboard served: %s (%u bytes, %u chunks) — stack HWM: %lu, heap: %lu->%lu KB",
+    ESP_LOGI(TAG, "Dashboard served: %s (%u bytes) — heap: %lu->%lu KB",
              err == ESP_OK ? "OK" : "FAIL",
-             html_len, (unsigned)((html_len + 511) / 512),
-             stack_hwm, free_pre / 1024, free_post / 1024);
+             html_len, free_pre / 1024, free_post / 1024);
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send dashboard HTML: %s", esp_err_to_name(err));
-        /* Fallback: send minimal inline error page */
-        const char *fallback =
-            "<!DOCTYPE html><html><body style='background:#0a0e17;color:#ff4444;font-family:monospace;padding:40px'>"
-            "<h1>VIPER-S3</h1><p>Dashboard HTML transmission failed.</p>"
-            "<p>Check serial monitor for details.</p>"
-            "<p><a href='/api/status' style='color:#00d4aa'>API Status</a></p>"
-            "</body></html>";
-        httpd_resp_set_type(req, "text/html; charset=utf-8");
-        httpd_resp_send(req, fallback, strlen(fallback));
+        /* Do NOT send a fallback here! The headers are already sent. 
+           Sending a fallback string will corrupt the HTTP stream and cause infinite loading. */
     }
 
     return err == ESP_OK ? ESP_OK : ESP_FAIL;
@@ -1273,6 +1510,7 @@ static esp_err_t api_orch_chain_run(httpd_req_t *req);
 static esp_err_t api_orch_chain_stop(httpd_req_t *req);
 static esp_err_t api_orch_schedule(httpd_req_t *req);
 static esp_err_t api_orch_schedule_stop(httpd_req_t *req);
+static esp_err_t api_report(httpd_req_t *req);
 
 /* ── API: Auth ────────────────────────────────────── */
 
@@ -1365,7 +1603,161 @@ static const httpd_uri_t s_uris[] = {
     { .uri = "/api/orchestrator/chain/stop",.method = HTTP_POST, .handler = api_orch_chain_stop },
     { .uri = "/api/orchestrator/schedule",     .method = HTTP_POST, .handler = api_orch_schedule },
     { .uri = "/api/orchestrator/schedule/stop",.method = HTTP_POST, .handler = api_orch_schedule_stop },
+    { .uri = "/api/report",                    .method = HTTP_GET,  .handler = api_report },
 };
+
+/* ── API: HTML Session Report ──────────────────────────── */
+
+/* Extract a JSON string field value from a JSONL line — C99 compatible */
+static void jsonl_extract_field(const char *json, const char *key, char *out, size_t out_len)
+{
+    char kbuf[80];
+    snprintf(kbuf, sizeof(kbuf), "\"%s\":\"", key);
+    const char *p = strstr(json, kbuf);
+    if (!p) { out[0] = '\0'; return; }
+    p += strlen(kbuf);
+    const char *e = strchr(p, '"');
+    size_t l = e ? (size_t)(e - p) : strlen(p);
+    if (l >= out_len) l = out_len - 1;
+    memcpy(out, p, l);
+    out[l] = '\0';
+}
+
+static esp_err_t api_report(httpd_req_t *req)
+{
+    if (auth_check(req) != ESP_OK) return ESP_OK;
+
+    uint32_t uptime_s  = (uint32_t)(esp_timer_get_time() / 1000000);
+    uint32_t heap_kb   = esp_get_free_heap_size() / 1024;
+    uint32_t heap_min  = esp_get_minimum_free_heap_size() / 1024;
+
+    /* Read credentials */
+    char *cred_buf = malloc(8192);
+    char *hash_buf = malloc(8192);
+    if (!cred_buf || !hash_buf) {
+        free(cred_buf); free(hash_buf);
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    size_t cred_len = 0, hash_len = 0;
+    storage_read_file(FILE_CREDS,   (uint8_t *)cred_buf, 8191, &cred_len);
+    storage_read_file(FILE_HASHES,  (uint8_t *)hash_buf, 8191, &hash_len);
+    cred_buf[cred_len] = '\0';
+    hash_buf[hash_len] = '\0';
+
+    /* Count entries */
+    int cred_count = 0, hash_count = 0;
+    for (char *p = cred_buf; *p; p++) if (*p == '\n') cred_count++;
+    for (char *p = hash_buf; *p; p++) if (*p == '\n') hash_count++;
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=viper_session_report.html");
+
+    /* Send header */
+    httpd_resp_sendstr_chunk(req,
+        "<!DOCTYPE html><html><head>"
+        "<meta charset='utf-8'><title>VIPER-S3 Session Report</title>"
+        "<style>*{box-sizing:border-box}body{font-family:'Segoe UI',system-ui,sans-serif;"
+        "background:#0a0e17;color:#e0e0e0;margin:0;padding:24px}"
+        ".hdr{background:linear-gradient(135deg,#0f1923,#1a2a3a);padding:24px;border-radius:8px;margin-bottom:20px}"
+        ".hdr h1{color:#00d4aa;margin:0 0 8px}h1 span{color:#ff4444}"
+        ".meta{color:#888;font-size:13px}"
+        ".section{background:#111b24;border:1px solid #1a2a3a;border-radius:8px;padding:20px;margin-bottom:16px}"
+        ".section h2{color:#00d4aa;font-size:16px;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid #1a2a3a}"
+        "table{width:100%;border-collapse:collapse}th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #1a2a3a}"
+        "th{color:#888;font-size:11px;text-transform:uppercase}td{color:#ccc;font-size:12px;font-family:monospace}"
+        ".pill{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase}"
+        ".pill-red{background:#2a0a0a;color:#ff4444}.pill-green{background:#0a2a0a;color:#00d4aa}"
+        ".empty{color:#555;font-style:italic;font-size:13px}</style></head><body>");
+
+    /* Header section */
+    char hdr_buf[512];
+    snprintf(hdr_buf, sizeof(hdr_buf),
+        "<div class='hdr'><h1>VIPER<span>-S3</span> Session Report</h1>"
+        "<div class='meta'>Generated: %lu s uptime &bull; "
+        "Heap free: %lu KB (min: %lu KB) &bull; "
+        "Credentials: %d &bull; Hashes: %d"
+        "</div></div>",
+        (unsigned long)uptime_s, (unsigned long)heap_kb, (unsigned long)heap_min,
+        cred_count, hash_count);
+    httpd_resp_sendstr_chunk(req, hdr_buf);
+
+    /* Credentials section */
+    httpd_resp_sendstr_chunk(req,
+        "<div class='section'><h2>&#x1f511; Captured Credentials</h2>");
+    if (cred_count == 0) {
+        httpd_resp_sendstr_chunk(req, "<div class='empty'>No credentials captured this session.</div>");
+    } else {
+        httpd_resp_sendstr_chunk(req,
+            "<table><tr><th>Source</th><th>Username</th><th>Password</th><th>IP</th><th>Timestamp</th></tr>");
+        /* Walk JSONL */
+        char *line = strtok(cred_buf, "\n");
+        while (line) {
+            if (line[0] == '{') {
+                char row[512];
+                char src[64], usr[64], pw[64], ip[32], ts[32];
+                jsonl_extract_field(line, "source",    src, sizeof(src));
+                jsonl_extract_field(line, "username",  usr, sizeof(usr));
+                jsonl_extract_field(line, "password",  pw,  sizeof(pw));
+                jsonl_extract_field(line, "ip",        ip,  sizeof(ip));
+                jsonl_extract_field(line, "timestamp", ts,  sizeof(ts));
+                snprintf(row, sizeof(row),
+                    "<tr><td>%s</td><td style='color:#00d4aa'>%s</td>"
+                    "<td style='color:#ff4444;font-weight:700'>%s</td><td>%s</td><td>%s</td></tr>",
+                    src[0]?src:"?", usr[0]?usr:"?", pw[0]?pw:"?",
+                    ip[0]?ip:"?", ts[0]?ts:"?");
+                httpd_resp_sendstr_chunk(req, row);
+            }
+            line = strtok(NULL, "\n");
+        }
+        httpd_resp_sendstr_chunk(req, "</table>");
+    }
+    httpd_resp_sendstr_chunk(req, "</div>");
+
+    /* Hashes section */
+    httpd_resp_sendstr_chunk(req,
+        "<div class='section'><h2>&#x1f513; Captured Hashes / PMKIDs</h2>");
+    if (hash_count == 0) {
+        httpd_resp_sendstr_chunk(req, "<div class='empty'>No hashes captured this session.</div>");
+    } else {
+        httpd_resp_sendstr_chunk(req, "<table><tr><th>Type</th><th>Hash</th><th>SSID</th></tr>");
+        char *hline = strtok(hash_buf, "\n");
+        while (hline) {
+            if (hline[0] == '{') {
+                char row[512];
+                char type[32]={0}, hash[128]={0}, ssid[64]={0};
+                const char *tp = strstr(hline, "\"type\":\"");
+                if (tp) { tp += 8; const char *e=strchr(tp,'"'); size_t l=e?(size_t)(e-tp):0; if(l<sizeof(type)){memcpy(type,tp,l);type[l]='\0';} }
+                const char *hp = strstr(hline, "\"hash\":\"");
+                if (hp) { hp += 8; const char *e=strchr(hp,'"'); size_t l=e?(size_t)(e-hp):0; if(l<sizeof(hash)){memcpy(hash,hp,l);hash[l]='\0';} }
+                const char *sp = strstr(hline, "\"ssid\":\"");
+                if (sp) { sp += 8; const char *e=strchr(sp,'"'); size_t l=e?(size_t)(e-sp):0; if(l<sizeof(ssid)){memcpy(ssid,sp,l);ssid[l]='\0';} }
+                snprintf(row, sizeof(row),
+                    "<tr><td><span class='pill pill-red'>%s</span></td>"
+                    "<td style='font-size:10px;color:#888;word-break:break-all'>%s</td>"
+                    "<td style='color:#ffaa00'>%s</td></tr>",
+                    type[0]?type:"unknown", hash[0]?hash:"?", ssid[0]?ssid:"?");
+                httpd_resp_sendstr_chunk(req, row);
+            }
+            hline = strtok(NULL, "\n");
+        }
+        httpd_resp_sendstr_chunk(req, "</table>");
+    }
+    httpd_resp_sendstr_chunk(req, "</div>");
+
+    /* Footer */
+    httpd_resp_sendstr_chunk(req,
+        "<div style='text-align:center;color:#333;font-size:11px;padding:16px'>"
+        "VIPER-S3 &mdash; DEF CON Edition &mdash; For authorized security research only"
+        "</div></body></html>");
+
+    /* End chunked transfer */
+    httpd_resp_sendstr_chunk(req, NULL);
+
+    free(cred_buf);
+    free(hash_buf);
+    return ESP_OK;
+}
 
 /* ── API: Responder ─────────────────────────────── */
 
@@ -1777,14 +2169,17 @@ static esp_err_t api_ir_learned(httpd_req_t *req)
     if (auth_check(req) != ESP_OK) return ESP_OK;
     char names[16][64];
     int count = ir_learned_list(names, 16);
-    char *buf = malloc(count * 80 + 32);
+    size_t buf_size = (size_t)count * 80 + 32;
+    if (buf_size < 32) buf_size = 32;  /* guard for count==0 */
+    char *buf = malloc(buf_size);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
 
-    int off = sprintf(buf, "{\"count\":%d,\"names\":[", count);
+    int off = snprintf(buf, buf_size, "{\"count\":%d,\"names\":[", count);
     for (int i = 0; i < count; i++) {
-        off += sprintf(buf + off, "%c\"%s\"", i > 0 ? ',' : ' ', names[i]);
+        off += snprintf(buf + off, buf_size - (size_t)off,
+                        "%c\"%s\"", i > 0 ? ',' : ' ', names[i]);
     }
-    sprintf(buf + off, "]}");
+    snprintf(buf + off, buf_size - (size_t)off, "]}");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, buf);
     free(buf);
@@ -2157,32 +2552,7 @@ static void start_watchdog(void)
 
 static esp_err_t try_start_server(void)
 {
-    extern const unsigned char servercert_pem_start[] asm("_binary_servercert_pem_start");
-    extern const unsigned char servercert_pem_end[]   asm("_binary_servercert_pem_end");
-    extern const unsigned char prvtkey_pem_start[] asm("_binary_prvtkey_pem_start");
-    extern const unsigned char prvtkey_pem_end[]   asm("_binary_prvtkey_pem_end");
-
-    httpd_ssl_config_t ssl_cfg = HTTPD_SSL_CONFIG_DEFAULT();
-    ssl_cfg.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
-    ssl_cfg.port_secure = 443;
-    ssl_cfg.httpd.max_open_sockets = 8;
-    ssl_cfg.httpd.max_uri_handlers = sizeof(s_uris) / sizeof(s_uris[0]);
-    ssl_cfg.httpd.lru_purge_enable = true;
-    ssl_cfg.httpd.stack_size = 8192;
-    ssl_cfg.servercert = servercert_pem_start;
-    ssl_cfg.servercert_len = servercert_pem_end - servercert_pem_start;
-    ssl_cfg.prvtkey_pem = prvtkey_pem_start;
-    ssl_cfg.prvtkey_len = prvtkey_pem_end - prvtkey_pem_start;
-
-    esp_err_t ret = httpd_ssl_start(&s_server, &ssl_cfg);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "HTTPS server started on port 443");
-        return ESP_OK;
-    }
-
-    ESP_LOGW(TAG, "HTTPS server failed (%s) — falling back to HTTP...", esp_err_to_name(ret));
-
-    /* Fall back to plain HTTP */
+    /* Disable HTTPS to fix browser accessibility. Fall back to plain HTTP directly. */
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
     cfg.max_open_sockets = 8;
@@ -2195,7 +2565,7 @@ static esp_err_t try_start_server(void)
     ESP_LOGI(TAG, "HTTP fallback — heap free: %lu KB, largest block: %lu",
              free_retry / 1024, block_retry);
 
-    ret = httpd_start(&s_server, &cfg);
+    esp_err_t ret = httpd_start(&s_server, &cfg);
     if (ret == ESP_OK) return ESP_OK;
 
     ESP_LOGW(TAG, "httpd_start (8 sockets, 8KB stack) failed: %s — retrying with 4 sockets, 6KB stack...",
@@ -2224,6 +2594,16 @@ static esp_err_t try_start_server(void)
 esp_err_t web_dashboard_init(void)
 {
     if (s_server) return ESP_OK;
+
+    /* Allocate log buffer from PSRAM to save 16KB of internal DRAM */
+    if (!s_log_buf) {
+        s_log_buf = heap_caps_malloc(LOG_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_log_buf) {
+            /* Fallback: internal DRAM */
+            s_log_buf = malloc(LOG_BUF_SIZE);
+        }
+        if (s_log_buf) memset(s_log_buf, 0, LOG_BUF_SIZE);
+    }
 
     if (!s_ws_mutex) {
         s_ws_mutex = xSemaphoreCreateMutex();

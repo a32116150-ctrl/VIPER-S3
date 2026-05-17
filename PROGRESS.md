@@ -1,12 +1,20 @@
 # VIPER-S3 Development Progress
 
-> **Current Status (May 17, 2026)**: Device flashed and running. All 25+ vulnerabilities fixed + L1 (API auth) + L2 (HTTPS) + L3 + L4 + L5. USB enumeration ✅ (device re-enumerates after flash). BLE assert on disabled controller ✅ (compile-time guard). Build succeeds, device boots clean through all 11 steps. Dashboard at https://192.168.4.1 (self-signed cert, auto-generated at build). Auth enabled default "viper". L6 WPA2-PSK fix applied (code-level, untested — needs WPA2 client hardware test).
+> **Current Status (May 17, 2026)**: Device flashed and running. All 25+ vulnerabilities fixed + L1 (API auth) + L2 (HTTPS) + L3 + L4 + L5. USB enumeration ✅ (device re-enumerates after flash). BLE assert on disabled controller ✅ (compile-time guard). Build succeeds, device boots clean through all 11 steps. Dashboard at https://192.168.4.1 (self-signed cert, auto-generated at build). Auth enabled default "viper". L6 WPA2-PSK fix applied (code-level, untested — needs WPA2 client hardware test). **Code review (May 17)**: 3 additional bugs fixed + 5 findings documented.
 
 ## Phase 1 — Core Infrastructure ✅
 - `CMakeLists.txt`, `partitions.csv`, `sdkconfig.defaults`
 - `main/main.c` — Boot: LittleFS → **Dashboard** (before WiFi, max DRAM) → WiFi → IR → NFC → Crack/Protocol → BLE (controller disabled) → USB → AI → Camera → Orchestrator
 - `storage_manager/` — LittleFS, 9 dirs, cred/hash JSONL logging, wordlist iterator
 - `web_dashboard/` — ESP HTTP server, 27 REST endpoints, WebSocket, dark SPA
+
+## Current Status: Defcon Readiness Prep — UI Fixes
+-   **Firmware**: Compiles perfectly (`viper_s3.bin`).
+-   **Dashboard Fixes Applied**: 
+    - Resolved fatal Javascript syntax/execution errors that caused the UI to freeze at "js status waiting" (Fixed `TypeError: Illegal invocation` on native fetch wrappers, fixed C-to-JS unicode escaping strings).
+    - Fixed the `/api/report` endpoint (401 Unauthorized) by allowing the API key to be passed via URL query parameter for browser new-tab requests.
+    - **Fixed White Screen Issue (May 17)**: Reverted `root_get_handler` to use `httpd_resp_send` instead of chunked transfer. This restores the `Content-Length` header, which is required by some browsers when strict `Cache-Control` headers are present, preventing the browser from hanging indefinitely and showing a white screen.
+-   **Hardware Stability**: Verified boot sequence without crashes; dashboard and WiFi init smoothly. capture
 
 ## Phase 2 — WiFi Engine ✅
 10 modules: scanner, deauth, evil twin, beacon flood, PMKID, karma, captive portal, DNS spoof, HTTP sniffer
@@ -110,8 +118,14 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
 - [x] **Flash & test** — Flashed May 17; boot verified clean through all 11 steps, no reboot loop
 - [x] **Commit and push to GitHub** — Committed and pushed 73e8a3a
 - [x] **Fix BLE assert** — Fixed May 17 (compile-time guard for disabled controller)
+- [x] **Code review fixes (May 17)** — 3 bugs fixed from post-review audit:
+  - [x] `api_captures_creds/hashes` — JSONL→JSON array conversion; corrected count (was hardcoded to 1)
+  - [x] `api_ir_learned` — replaced unbounded `sprintf` with `snprintf` + bounds tracking
+  - [x] `ble_engine_init` — removed duplicate `nvs_flash_init()` that could wipe NVS config on corruption
 - [ ] **Fix L6** — Verify WPA2-PSK works (code fix applied, needs WPA2 client hardware test)
 - [ ] **Test dashboard** — Verify http://192.168.4.1 loads, test all endpoints
+- [ ] **Move `s_log_buf` to PSRAM** — Free 16KB internal DRAM (`heap_caps_malloc(16384, MALLOC_CAP_SPIRAM)`)
+- [ ] **Add content-length guard to POST endpoints** — Reject `Content-Length >= buf_size` before `httpd_req_recv()`
 
 ---
 

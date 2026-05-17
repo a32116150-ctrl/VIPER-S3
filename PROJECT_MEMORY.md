@@ -58,7 +58,7 @@ antigravity/
 │   ├── camera_engine/       # 5 files: OV3660 driver, MJPEG, motion detect, QR decode (quirc)
 │   ├── usb_engine/          # 6 files: TinyUSB HID+CDC, Ducky Script, OS fingerprint
 │   ├── ble_engine/          # 10 files: NimBLE scanner, spam, GATT UART C2, MITM, proprietary scans
-│   ├── web_dashboard/       # 3 files: ESP HTTP server, 27 REST endpoints, WebSocket, dark SPA
+│   ├── web_dashboard/       # 3 files: ESP HTTP server, 53 REST endpoints, WebSocket, dark SPA (16 tabs)
 │   ├── attack_orchestrator/ # 3 files: attack chains, triggers, scheduler, health monitor
 │   ├── responder/           # 4 files: LLMNR, NBT-NS, mDNS poisoning
 │   ├── crack_engine/        # 3 files: on-device NTLM/MD5/SHA1/PMKID cracking
@@ -142,10 +142,11 @@ antigravity/
 
 ## Web Dashboard
 
-- **Port**: 80 (HTTP)
-- **Mode**: Dark SPA with 37 REST endpoints + WebSocket live updates
-- **Access**: http://192.168.4.1 (AP mode) or device IP on STA network
-- **WebSocket**: `/ws` for real-time event stream (fixed `.is_websocket = true` — was missing, causing browser to never receive 101 Switching Protocols)
+- **Port**: 443 (HTTPS, auto-fallback to 80)
+- **Mode**: Dark SPA with 53 REST endpoints + WebSocket live updates
+- **Access**: https://192.168.4.1 (self-signed cert) or http://192.168.4.1 (HTTP fallback)
+- **Auth**: API key — default `"viper"`, stored in `/viper/config/config.json`
+- **WebSocket**: `/ws` for real-time event stream
 
 ### Frontend Tabs (13 implemented)
 | Tab | Features | Status |
@@ -388,6 +389,12 @@ snprintf(s_serial_str, sizeof(s_serial_str), "%02X%02X%02X%02X%02X%02X",
   6. **Retry dashboard init after WiFi**: If dashboard failed before WiFi, it tries again after WiFi is up (DRAM may have shifted).
   7. **Increased LWIP memory pools** (`sdkconfig.defaults`): `CONFIG_LWIP_MEM_NUMBUF=64`, `CONFIG_LWIP_TCP_MSS=1460`, `CONFIG_LWIP_TCP_WND=32768` for more reliable socket buffer allocation.
 - **Result**: Dashboard starts reliably because it allocates its task stack before WiFi and BLE consume DRAM. Even if `httpd_start()` fails with the full config, it automatically retries with a smaller config.
+- **Web Dashboard**: 
+    - Full SPA (Single Page Application) with real-time WebSocket telemetry.
+    - Implemented a unified `fetch` interceptor (`_f.call(window)`) for global API key injection.
+    - Captive portal integrated with dynamic premium templates.
+    - Real-time Network Topology Map (Canvas-based) and Event Feed.
+    - Automated HTML Session Reporting (`/api/report` with URL query auth fallback).
 
 ---
 
@@ -488,7 +495,7 @@ All other components are local in `components/`.
 11. **USB init failure is graceful**: `tinyusb_driver_install()` failure no longer triggers `ESP_ERROR_CHECK` abort. System logs and continues.
 12. **HTTP server may fail to start**: If camera engine runs before HTTP server, DRAM fragmentation causes `httpd_start()` to fail. **Fixed** by moving dashboard before camera in boot order.
 13. **Flash baud rate**: 115200 is reliable for esptool. Higher rates (460800) may fail on some USB-serial adapters.
-14. **WPA2-PSK auth broken**: AP with `WIFI_AUTH_WPA2_PSK` and password `00000000` fails authentication on all clients. Temporarily using open AP. Needs investigation — possibly PMF, cipher, or ESP-IDF v5.3 WiFi config quirk.
+14. **WPA2-PSK status**: Code fix applied (`pmf_cfg.required=false` + `esp_wifi_disable_pmf_config` NVS clear). Awaiting hardware test — connect a phone to SSID `VIPER-S3` / `00000000` to confirm.
 15. **Dashboard limited frontend**: 11 of 20+ documented tabs are implemented in the SPA HTML/JS. Backend REST APIs exist for USB, NFC, IR, AI/ML, Orchestrator but have no frontend UI. Responder, Crack, and Protocol Attacks tabs added May 14.
 16. **Camera placeholder**: Camera tab shows "not active" because DMA allocation fails (DRAM fragmentation). Graceful fallback works — no crash.
 17. **HTTP server boot-loop**: Setting `max_open_sockets=12` + `stack_size=3072` + `max_uri_handlers=31` simultaneously exhausted internal DRAM during `httpd_start()`. Error: `lwip_arch: thread_sem_init: out of memory`. **Fix**: `max_open_sockets` reduced to 8, `max_uri_handlers=31` kept (just a pointer table, ~124 bytes). All 31 URI handlers now register cleanly.
@@ -622,17 +629,6 @@ Source-verified findings from code audit across all 13 components.
 | **M12** | `wifi_pmkid.c:130` | `esp_timer_start_periodic` return unchecked | Added return check + cleanup on failure |
 | **M13** | `sdkconfig.defaults` | CPU 240MHz config missing — 33% lower perf | Added `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240` |
 
-### 🔵 LOW / INFORMATIONAL
-
-| # | Component | Vulnerability | Fix |
-|---|-----------|--------------|-----|
-| **L1** | All API endpoints | **No authentication** — any network client can trigger attacks, read captures | Fixed — pre-shared API key `X-API-Key` header on all endpoints; `POST /api/auth` login; default `"viper"`; stored in config.json |
-| **L2** | Dashboard | **No HTTPS** — all traffic (including captures viewed in UI) in plaintext | Fixed — HTTPS server on port 443 with embedded self-signed cert (SAN: 192.168.4.1, viper-s3.local); falls back to HTTP if SSL init fails |
-| **L3** | `wifi_engine.h:105` | `wifi_set_mac` declared but never defined | Fixed — removed dead declaration |
-| **L4** | Multiple files | 20+ REST endpoints missing `Content-Type: application/json` (defaults to `text/html`) | Fixed — added `httpd_resp_set_type(req, "application/json")` to all 25+ JSON endpoints |
-| **L5** | `sdkconfig.defaults` | 8 unknown Kconfig symbols (renamed/removed in ESP-IDF v5.3) | Not started — run `idf.py reconfigure` to diff |
-| **L6** | WPA2-PSK | AP uses open auth — WPA2-PSK broken, any client can connect | Code fix attempted (WPA2 with PMF disabled) but untested; USB enumeration broken prevents flash |
-
 ---
 
 ## Contact / Notes
@@ -642,7 +638,37 @@ Source-verified findings from code audit across all 13 components.
 - Built by opencode with assistant guidance
 - Last build: May 17, 2026 (Build succeeded — 0x137bf0, 70% app partition free)
 - Last flash: May 17, 2026 — verified clean boot through all 11 steps
-- Last fix batch: May 17, 2026 (BLE compile-time guard for disabled controller; USB enumeration confirmed working)
+- Last fix batch: May 17, 2026 — Code review + 3 additional bug fixes (JSONL captures, IR sprintf, BLE NVS)
+
+---
+
+### [2026-05-17] Web Dashboard JS Bug Fixes
+- **Global Auth Interceptor**: Fixed `TypeError: Illegal invocation` by correctly binding the intercepted `fetch` function to `window` using `.call()`. This resolves the issue where all fetch requests threw exceptions and broke the frontend initialization loop.
+- **Report API Auth**: Changed the HTML `Report` link to inject the API key directly via query parameter (`/api/report?key=viper`). Updated `auth_check` in C backend to allow API key validation through URL query parameters for endpoints that are opened directly in a new browser tab.
+- **JavaScript Unicode Bug**: Replaced raw unicode string payloads (like `\U0001F513`) with properly escaped JavaScript sequences (`\\u{1f513}`) to prevent fatal C compiler to Javascript injection string syntax errors.
+
+### [2026-05-17] Advanced DEF CON Hardening
+
+Reviewer audit across all 13 components after L1–L5 security hardening. Project found to be in strong, near-production state. 3 additional bugs fixed, 5 lower-priority findings documented.
+
+### ✅ Fixed (May 17, 2026)
+
+| # | Component | Issue | Fix |
+|---|-----------|-------|-----|
+| CR1 | `ble_engine.c:47-54` | Duplicate `nvs_flash_init()` — redundant after `system_init()`, NVS erase fallback could wipe config if NVS corrupted at BLE init time | Removed duplicate block; NVS init belongs exclusively to `system_init()` |
+| CR2 | `web_dashboard.c:369,394` | `api_captures_creds/hashes` — count hardcoded to `1`, raw JSONL embedded inside JSON array brackets (invalid JSON for multi-entry files) | Added `jsonl_to_json_array()` helper; returns real entry count; produces valid JSON array |
+| CR3 | `web_dashboard.c:1783` | `api_ir_learned` — unbounded `sprintf` without size tracking (potential buffer overrun if IR signal names are longer than expected) | Replaced all three `sprintf` calls with `snprintf` with `buf_size` tracking |
+| CR4 | `web_dashboard.c:1420-1460` | Dashboard white screen/hang — chunked HTML transfer lacked `Content-Length`, hanging browsers enforcing strict `Cache-Control` policies | Reverted `root_get_handler` to `httpd_resp_send()` to ensure `Content-Length` generation and proper rendering |
+
+### 🟡 Open Findings (Low Priority)
+
+| # | Component | Finding | Recommendation |
+|---|-----------|---------|----------------|
+| CR4 | `web_dashboard.c:36` | `s_log_buf[16384]` in `.bss` (internal DRAM) — costs 16KB of scarce DRAM | Move to PSRAM: `heap_caps_malloc(16384, MALLOC_CAP_SPIRAM)` at init |
+| CR5 | Multiple POST handlers | No `Content-Length >= buf_size` guard before `httpd_req_recv()` — oversized body silently truncated | Add: `if (req->content_len >= sizeof(buf)) { httpd_resp_send_err(...); return ESP_OK; }` |
+| CR6 | `storage_manager.h` | API key (`dashboard_password`) stored in plaintext JSON on LittleFS — extractable via `esptool read_flash` | Store salted SHA-256 hash in NVS (backed by eFuse flash encryption if enabled) |
+| CR7 | `sdkconfig.defaults:72` | `CONFIG_ESP_TASK_WDT_PANIC=n` — hung tasks produce no coredump (coredump partition goes unused) | Set `=y`; add `esp_task_wdt_reset()` calls inside long-running attack loops |
+| CR8 | `web_dashboard.c:470` | MJPEG stream capped at 300 frames (~15s) then terminates — browser shows still image | Implement disconnect-on-client-close check or document as known limitation |
 
 ---
 
