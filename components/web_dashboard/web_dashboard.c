@@ -103,9 +103,9 @@ static esp_err_t auth_check(httpd_req_t *req)
 {
     if (!s_auth_enabled) return ESP_OK;
     char buf[API_KEY_MAX_LEN + 8] = {0};
-    size_t len = httpd_req_get_hdr_value_str(req, "X-API-Key", buf, sizeof(buf) - 1);
+    esp_err_t hdr_err = httpd_req_get_hdr_value_str(req, "X-API-Key", buf, sizeof(buf) - 1);
     
-    if (len > 0 && strcmp(buf, s_api_key) == 0) {
+    if (hdr_err == ESP_OK && strcmp(buf, s_api_key) == 0) {
         return ESP_OK;
     }
     
@@ -1319,8 +1319,6 @@ static const char DASHBOARD_HTML[] =
     "var d=document.createElement('div');"
     "d.className=cls||'info';"
     "d.textContent='['+new Date().toLocaleTimeString()+'] '+msg;"
-    "el.appendChild(d);"
-    "el.scrollTop=el.scrollHeight;"
     "if(el.children.length===1&&el.children[0].textContent==='Waiting to start...')el.innerHTML='';"
     "el.appendChild(d);el.scrollTop=el.scrollHeight;"
     "}"
@@ -1370,10 +1368,10 @@ static const char DASHBOARD_HTML[] =
     "topoNodes.push({ssid:ssid,ch:ch,rssi:rssi,targeted:targeted||false});}"
     "drawTopology();"
     "}"
-    "document.addEventListener('DOMContentLoaded',function(){"
+    "(function(){"
     "var cv=document.getElementById('topoCanvas');"
     "if(cv){cv.addEventListener('click',function(){drawTopology();});}"
-    "});"
+    "})();"
     /* WebSocket event handler additions for autopwn/cracked */
     "function handleWsMessage(evt){"
     "try{var msg=JSON.parse(evt.data);}catch(e){return;}"
@@ -1438,12 +1436,12 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             ESP_LOGI(TAG, "Dashboard served from PSRAM (%u bytes)", html_len);
             return ESP_OK;
         }
-        ESP_LOGW(TAG, "httpd_resp_send from PSRAM failed: %s — headers may be corrupt, returning error",
-                 esp_err_to_name(err));
-        return ESP_FAIL;
+        ESP_LOGW(TAG, "PSRAM send failed (%s), retrying chunked", esp_err_to_name(err));
+        /* Fall through to chunked — headers are already sent but httpd_resp_send_chunk
+         * will overwrite Content-Type with Transfer-Encoding: chunked. */
     }
 
-    ESP_LOGW(TAG, "PSRAM OOM (%u bytes), using chunked transfer", html_len);
+    ESP_LOGW(TAG, "Chunked transfer for dashboard HTML (%u bytes)", html_len);
 
     /* Chunked fallback: send in 4KB chunks from flash.
      * httpd_resp_send_chunk automatically sets Transfer-Encoding: chunked.
@@ -1511,6 +1509,7 @@ static esp_err_t api_usb_type(httpd_req_t *req);
 static esp_err_t api_usb_release(httpd_req_t *req);
 static esp_err_t api_usb_ducky(httpd_req_t *req);
 static esp_err_t api_usb_payloads(httpd_req_t *req);
+static esp_err_t api_usb_payload_run(httpd_req_t *req);
 
 /* ── Forward declarations: AI ───────────────────── */
 static esp_err_t api_ai_twins(httpd_req_t *req);
@@ -1638,6 +1637,7 @@ static const httpd_uri_t s_uris[] = {
     { .uri = "/api/usb/release",  .method = HTTP_POST, .handler = api_usb_release },
     { .uri = "/api/usb/ducky",    .method = HTTP_POST, .handler = api_usb_ducky },
     { .uri = "/api/usb/payloads", .method = HTTP_GET,  .handler = api_usb_payloads },
+    { .uri = "/api/usb/payload/run", .method = HTTP_POST, .handler = api_usb_payload_run },
     /* AI */
     { .uri = "/api/ai/twins",          .method = HTTP_GET,  .handler = api_ai_twins },
     { .uri = "/api/ai/twins/delete",   .method = HTTP_POST, .handler = api_ai_twins_delete },
@@ -2369,6 +2369,40 @@ static esp_err_t api_usb_payloads(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
     free(buf);
+    return ESP_OK;
+}
+
+static esp_err_t api_usb_payload_run(httpd_req_t *req)
+{
+    if (auth_check(req) != ESP_OK) return ESP_OK;
+    char buf[256];
+    CHECK_CONTENT_LEN(req, buf);
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
+    buf[len] = '\0';
+
+    char name[128] = {0};
+    const char *n = strstr(buf, "\"name\"");
+    if (n) {
+        n = strchr(n + 6, '"');
+        if (n) { n++; int i = 0; while (*n && *n != '"' && i < 127) name[i++] = *n++; }
+    }
+
+    if (name[0]) {
+        char *script = malloc(4096);
+        if (script) {
+            size_t slen = 0;
+            if (usb_payload_get(name, script, &slen) == ESP_OK) {
+                script[slen] = '\0';
+                usb_payload_execute_script(script);
+                dashboard_log("USB payload run: %s (%u bytes)", name, (unsigned)slen);
+            }
+            free(script);
+        }
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
