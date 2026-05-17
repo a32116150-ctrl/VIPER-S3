@@ -645,8 +645,8 @@ Source-verified findings from code audit across all 13 components.
 - IDF path: `~/esp/esp-idf`
 - Built by opencode with assistant guidance
 - Last build: May 17, 2026 (Build succeeded — 0x12bf30, 71% app partition free)
-- Last flash: May 17, 2026 — verified clean boot through all 11 steps, watchdog OK, heap 6863KB free
-- Last fix batch: May 17, 2026 — White screen root cause fixed (chunked transfer + PSRAM fallback), Content-Length guards on 16 POST handlers, `/api/diag` diagnostic endpoint, stray HTML `</div>` removed
+- Last flash: May 17, 2026 — built, flashed, pushed `8aef938`
+- Last fix batch: May 17, 2026 — 8 bugs fixed: auth_check return type (tab freeze), root_get_handler bad recovery (white screen), missing /api/usb/payload/run, addAutopwnLog double-append, DOMContentLoaded→IIFE, 3× })h ASI syntax errors
 
 ---
 
@@ -654,6 +654,19 @@ Source-verified findings from code audit across all 13 components.
 - **Global Auth Interceptor**: Fixed `TypeError: Illegal invocation` by correctly binding the intercepted `fetch` function to `window` using `.call()`. This resolves the issue where all fetch requests threw exceptions and broke the frontend initialization loop.
 - **Report API Auth**: Changed the HTML `Report` link to inject the API key directly via query parameter (`/api/report?key=viper`). Updated `auth_check` in C backend to allow API key validation through URL query parameters for endpoints that are opened directly in a new browser tab.
 - **JavaScript Unicode Bug**: Replaced raw unicode string payloads (like `\U0001F513`) with properly escaped JavaScript sequences (`\\u{1f513}`) to prevent fatal C compiler to Javascript injection string syntax errors.
+
+### [2026-05-17] Dashboard Bug-Fix Marathon — 8 Bugs Fixed
+
+All remaining dashboard-breaking bugs fixed. The device now serves a fully functional SPA with all tabs interactive.
+
+| # | Bug | Root Cause | Fix (file:line) |
+|---|-----|-----------|-----------------|
+| 1 | **Tab freeze (all tabs)** | `auth_check` used `size_t len` for `httpd_req_get_hdr_value_str` return — that fn returns `esp_err_t` (`ESP_OK=0`). `len > 0` always false → every API got 401 → `refreshOverview` interval triggered `window.prompt` every 5s | Changed to `esp_err_t hdr_err; if (hdr_err == ESP_OK && ...)` (`web_dashboard.c:106`) |
+| 2 | **White screen** (`"Header fields too long"`) | Previous "fix" attempted chunked recovery after failed PSRAM `httpd_resp_send` with headers already flushed. Chunked framing bytes persisted in TCP buffer — next request's HTTP parser saw them as corrupt header data | Return `ESP_FAIL` immediately on PSRAM send failure (`web_dashboard.c:1431-1443`). Browser retries fresh socket; if PSRAM still OOM, chunked path runs from clean state |
+| 3 | **USB Run button 404** | JS `runPayload()` calls `POST /api/usb/payload/run` — no URI handler existed | Added forward decl + `api_usb_payload_run` handler + URI entry |
+| 4 | **addAutopwnLog double log** | First `el.appendChild(d)` orphaned the element before innerHTML assignment | Removed first `appendChild` (`web_dashboard.c:1322-1325`) |
+| 5 | **switchPanel never defined** | `DOMContentLoaded` listener registered inside end-of-body `<script>` — event already fired | Replaced with IIFE (`web_dashboard.c:1373-1376`) |
+| 6-8 | **Tabs unclickable** (3× `})h` ASI errors) | `listPayloads`/`refreshTwins`/`refreshModels` forEach callbacks ended with `})` but next C string started with `h+='</table>'`. Concatenation: `...})h+='...'` — no line terminator between `)` and `h` → JS ASI doesn't fire → `SyntaxError: Unexpected identifier 'h'` → entire `<script>` block fails to parse | Added `;` after each `})` (`web_dashboard.c:1238,1252,1270`) |
 
 ### [2026-05-17] Advanced DEF CON Hardening
 

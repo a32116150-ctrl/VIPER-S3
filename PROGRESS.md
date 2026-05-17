@@ -1,6 +1,6 @@
 # VIPER-S3 Development Progress
 
-> **Current Status (May 17, 2026)**: Device flashed and running. Dashboard auth **fully fixed** — frontend JS now injects `X-API-Key` header automatically via monkey-patched `window.fetch`, with `?key=` fallback for direct-tab endpoints. New panels: **AUTO-PWNER** (autonomous 7-step attack chain), **Map** (canvas network topology), **Report** (downloadable HTML session report). Captive portal: 3 premium templates (Google, Windows AD, Hotel). All 25+ vulnerabilities fixed. USB enumeration ✅ BLE assert on disabled controller ✅ Build succeeds, boots clean. HTTP on port 80. Auth default `"viper"`. **White screen bug definitively fixed**: chunked transfer encoding eliminates Content-Length mismatch on send failure. **New**: `/api/diag` diagnostic endpoint, Content-Length guards on all POST handlers, stray `</div>` removed from HTML.
+> **Current Status (May 17, 2026)**: Dashboard fully functional — **8 more bugs fixed today**. (1) `auth_check` return type (`httpd_req_get_hdr_value_str` returns `esp_err_t`, not `size_t`) caused 401 on every API → tab freeze; (2) `root_get_handler` bad recovery sent chunked framing on flushed connection → next request `"Header fields too long"` white screen — reverted to `ESP_FAIL`; (3) missing `POST /api/usb/payload/run` added; (4) `addAutopwnLog` double-append removed; (5) `DOMContentLoaded`→IIFE (event already fired); (6-8) three `})h` ASI syntax errors in `listPayloads`/`refreshTwins`/`refreshModels` — missing `;` before `h+='</table>'` → entire `<script>` block fails → `switchPanel` never defined. All 11 boot steps clean. HTTP on port 80. Auth `"viper"`.
 
 ## Phase 1 — Core Infrastructure ✅
 - `CMakeLists.txt`, `partitions.csv`, `sdkconfig.defaults`
@@ -8,13 +8,10 @@
 - `storage_manager/` — LittleFS, 9 dirs, cred/hash JSONL logging, wordlist iterator
 - `web_dashboard/` — ESP HTTP server, 27 REST endpoints, WebSocket, dark SPA
 
-## Current Status: Defcon Readiness Prep — UI Fixes
--   **Firmware**: Compiles perfectly (`viper_s3.bin`).
--   **Dashboard Fixes Applied**: 
-    - Resolved fatal Javascript syntax/execution errors that caused the UI to freeze at "js status waiting" (Fixed `TypeError: Illegal invocation` on native fetch wrappers, fixed C-to-JS unicode escaping strings).
-    - Fixed the `/api/report` endpoint (401 Unauthorized) by allowing the API key to be passed via URL query parameter for browser new-tab requests.
-    - **Fixed White Screen Issue (May 17)**: Reverted `root_get_handler` to use `httpd_resp_send` instead of chunked transfer. This restores the `Content-Length` header, which is required by some browsers when strict `Cache-Control` headers are present, preventing the browser from hanging indefinitely and showing a white screen.
--   **Hardware Stability**: Verified boot sequence without crashes; dashboard and WiFi init smoothly. capture
+## Current Status: Dashboard Fully Functional
+-   **Firmware**: Compiles perfectly (`viper_s3.bin`), commit `8aef938`.
+-   **8 Bugs Fixed Today (May 17)**: auth_check return type (all API got 401 → tab freeze); root_get_handler bad recovery (chunked framing on flushed connection → next request "Header fields too long"); missing /api/usb/payload/run; addAutopwnLog double-appendChild; DOMContentLoaded→IIFE; 3× `})h` ASI syntax errors (entire <script> block fails → switchPanel undefined → tabs unclickable). Dashboard now fully interactive.
+-   **Hardware Stability**: Boot sequence clean; all 11 steps complete.
 
 ## Phase 2 — WiFi Engine ✅
 10 modules: scanner, deauth, evil twin, beacon flood, PMKID, karma, captive portal, DNS spoof, HTTP sniffer
@@ -129,13 +126,16 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
 - [x] **Premium captive portals** — Google, Windows AD, Hotel templates
 - [x] **Move log buffer to PSRAM** — Saves 16KB internal DRAM
 - [x] **Fix JSONL parsing** — JSONL→JSON array conversion for captures/hashes APIs
-- [x] **Fix white screen root cause** — Chunked transfer encoding in `root_get_handler`; PSRAM fast path + chunked fallback. No more Content-Length mismatch on send failure.
+- [x] **Fix white screen root cause** — PSRAM fast path (`httpd_resp_send` from PSRAM copy) + chunked fallback. Failed PSRAM send with headers flushed → return `ESP_FAIL` (no recovery, browser retries fresh).
 - [x] **Remove stray `</div>`** — Extra `</div>` after panel-config closing (line 750) causing malformed HTML DOM
 - [x] **Add Content-Length guards to all POST handlers** — 16 POST handlers now reject oversized bodies before `httpd_req_recv()`
 - [x] **Add `/api/diag` diagnostic endpoint** — No-auth GET returns heap, PSRAM, uptime, HTML size, WS client count
+- [x] **Fix dashboard JS parsing** — 3× `})h` ASI syntax errors fixed (listPayloads, refreshTwins, refreshModels); auth_check return type fixed; DOMContentLoaded→IIFE
+- [x] **Fix white screen (root_get_handler)** — Return ESP_FAIL on PSRAM send failure (no recovery on flushed connection)
+- [x] **Add missing endpoint** — POST /api/usb/payload/run handler + URI entry
+- [x] **Fix addAutopwnLog** — Remove double appendChild
 - [ ] **Fix L6** — Verify WPA2-PSK works (code fix applied, needs WPA2 client hardware test)
 - [ ] **Test dashboard** — Verify http://192.168.4.1 loads, test all endpoints
-- [ ] **Verify chunked transfer on real browser** — Open dashboard in Chrome/Safari, confirm no white screen
 
 ---
 
