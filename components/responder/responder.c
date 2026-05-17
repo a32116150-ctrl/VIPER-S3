@@ -46,11 +46,13 @@ static int build_dns_response(const uint8_t *query, int qlen, uint8_t *resp, int
 {
     if (qlen < 12 || max_resp < 512) return 0;
 
+    memset(resp, 0, max_resp);
     memcpy(resp, query, 2);
     resp[2] = 0x84; resp[3] = 0x00;
     memcpy(resp + 4, query + 4, 2);
     resp[6] = 0x00; resp[7] = 0x01;
     resp[8] = 0x00; resp[9] = 0x00;
+    resp[10] = 0x00; resp[11] = 0x00;
 
     int off = 12;
     int qoff = 12;
@@ -225,7 +227,7 @@ static void responder_task(void *arg)
         }
         if (FD_ISSET(s_mdns_fd, &readfds)) {
             int len = recvfrom(s_mdns_fd, buf, sizeof(buf), 0, (struct sockaddr *)&src, &src_len);
-            if (len > 0 && ntohs(src.sin_port) != 5353) handle_mdns(buf, len, &src);
+            if (len > 0) handle_mdns(buf, len, &src);
         }
     }
 
@@ -256,7 +258,11 @@ static int udp_listen(uint16_t port, uint32_t mcast_addr)
 
     if (mcast_addr) {
         struct ip_mreq mreq = { .imr_multiaddr = { .s_addr = mcast_addr }, .imr_interface = { .s_addr = INADDR_ANY } };
-        setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+        if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+            ESP_LOGW(TAG, "Failed to join multicast group 0x%08lx — closing socket", (unsigned long)mcast_addr);
+            close(fd);
+            return -1;
+        }
     }
 
     return fd;

@@ -16,6 +16,13 @@ static const char *TAG = "PAYLOAD";
 static uint32_t s_default_delay = 0;
 static int s_repeat_count = 0;
 
+uint32_t usb_payload_set_default_delay(uint32_t ms)
+{
+    uint32_t old = s_default_delay;
+    s_default_delay = ms;
+    return old;
+}
+
 typedef struct {
     const char *name;
     uint8_t keycode;
@@ -258,12 +265,14 @@ esp_err_t usb_payload_execute_script(const char *script_content)
             line[li] = '\0';
             int r = usb_payload_execute_line(line);
 
-            if (r > 1 && repeat_line[0]) {
-                for (int i = 0; i < r - 1; i++) {
-                    usb_payload_execute_line(repeat_line);
+            if (r > 1) {
+                if (repeat_line[0]) {
+                    for (int i = 0; i < r - 1; i++) {
+                        usb_payload_execute_line(repeat_line);
+                    }
                 }
                 repeat_line[0] = '\0';
-            } else if (r == 0) {
+            } else if (r == 1) {
                 strncpy(repeat_line, line, sizeof(repeat_line) - 1);
             }
 
@@ -275,7 +284,10 @@ esp_err_t usb_payload_execute_script(const char *script_content)
     }
     if (li > 0) {
         line[li] = '\0';
-        usb_payload_execute_line(line);
+        int r = usb_payload_execute_line(line);
+        if (r == 1) {
+            strncpy(repeat_line, line, sizeof(repeat_line) - 1);
+        }
     }
 
     return ESP_OK;

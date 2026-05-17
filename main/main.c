@@ -20,6 +20,7 @@
 #include "esp_event.h"
 
 /* VIPER-S3 modules */
+#include "driver/gpio.h"
 #include "storage_manager.h"
 #include "wifi_engine.h"
 #include "ble_engine.h"
@@ -62,8 +63,35 @@ static void system_init(void)
 /* ────────────────────────────────────────────────
    App main
    ──────────────────────────────────────────────── */
+/* Boot delay to allow USB-serial-JTAG to enumerate before any
+   firmware init that might touch shared USB GPIO pins. */
+static void boot_delay(void)
+{
+    for (int i = 0; i < 20; i++) {
+        esp_rom_delay_us(50000);  // 50ms x 20 = 1s total
+    }
+}
+
+/* Returns true if BOOT button (GPIO0) is held low at startup.
+   Used to skip TinyUSB OTG init so USB-serial-JTAG stays live for flashing. */
+static bool boot_btn_held(void)
+{
+    gpio_config_t io = {
+        .pin_bit_mask = BIT64(GPIO_NUM_0),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = true,
+    };
+    gpio_config(&io);
+    esp_rom_delay_us(10000);  // 10ms debounce
+    return gpio_get_level(GPIO_NUM_0) == 0;
+}
+
 void app_main(void)
 {
+    /* Small delay at boot to give USB-serial-JTAG time to enumerate
+       before the firmware configures any peripherals. */
+    boot_delay();
+
     system_init();
 
     /* 1. Mount LittleFS — all modules depend on storage */
@@ -131,9 +159,14 @@ void app_main(void)
         if (r != ESP_OK) ESP_LOGW(TAG, "[8/11] BLE engine skipped: %s", esp_err_to_name(r));
     }
 
-    /* 9. Start USB engine (optional — graceful failure) */
-    ESP_LOGI(TAG, "[9/11] Starting USB engine...");
-    {
+    /* 9. Start USB engine (optional — graceful failure).
+          Skip if BOOT button is held at startup — this preserves the
+          USB-serial-JTAG interface for flashing/debugging by preventing
+          TinyUSB from taking over the USB OTG peripheral. */
+    if (boot_btn_held()) {
+        ESP_LOGW(TAG, "[9/11] USB engine skipped — BOOT held, preserving USB-serial-JTAG");
+    } else {
+        ESP_LOGI(TAG, "[9/11] Starting USB engine...");
         esp_err_t r = usb_engine_init();
         if (r != ESP_OK) ESP_LOGW(TAG, "[9/11] USB engine skipped: %s", esp_err_to_name(r));
     }

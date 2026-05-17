@@ -6,4 +6,5 @@ managed_components/
 *.swo
 *~
 .DS_Store
+components/web_dashboard/certs/
 

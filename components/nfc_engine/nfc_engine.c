@@ -319,12 +319,14 @@ esp_err_t nfc_detect_tag(nfc_tag_info_t *info)
     return info->present ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
-esp_err_t nfc_read_sector(uint8_t sector, uint8_t key[6], nfc_sector_t *data)
+esp_err_t nfc_read_sector(uint8_t sector, uint8_t key[6], nfc_sector_t *data, int num_blocks)
 {
     if (!data) return ESP_ERR_INVALID_ARG;
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    if (num_blocks > NFC_BLOCKS_PER_SECTOR) num_blocks = NFC_BLOCKS_PER_SECTOR;
+    if (num_blocks <= 0) return ESP_ERR_INVALID_ARG;
 
-    uint8_t block = sector * 4;
+    uint8_t block = sector * NFC_BLOCKS_PER_SECTOR;
 
     uint8_t auth_cmd[] = {0x40, 0x01, block, key[0], key[1], key[2], key[3], key[4], key[5]};
     uint8_t resp[PN532_BUFFER_LEN];
@@ -338,7 +340,7 @@ esp_err_t nfc_read_sector(uint8_t sector, uint8_t key[6], nfc_sector_t *data)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < num_blocks; i++) {
         uint8_t read_cmd[] = {0x10, 0x01, (uint8_t)(block + i)};
         resp_len = 0;
         if (!pn532_send_command(read_cmd, sizeof(read_cmd), resp, &resp_len)) {
@@ -422,12 +424,19 @@ esp_err_t nfc_read_ndef(nfc_ndef_t *ndef)
         int payload_start = 3 + type_len;
 
         if (type_len == 1 && ndef->raw[3] == 'U' && payload_start < off) {
-            snprintf(ndef->uri, sizeof(ndef->uri), "%s", ndef->raw + payload_start);
+            int uri_len = off - payload_start;
+            if (uri_len > (int)sizeof(ndef->uri) - 1) uri_len = sizeof(ndef->uri) - 1;
+            memcpy(ndef->uri, ndef->raw + payload_start, uri_len);
+            ndef->uri[uri_len] = '\0';
         }
         if (type_len == 1 && ndef->raw[3] == 'T' && payload_start < off) {
             int lang_len = ndef->raw[payload_start];
-            if (payload_start + 1 + lang_len < off) {
-                snprintf(ndef->text, sizeof(ndef->text), "%s", ndef->raw + payload_start + 1 + lang_len);
+            int text_start = payload_start + 1 + lang_len;
+            if (text_start < off) {
+                int text_len = off - text_start;
+                if (text_len > (int)sizeof(ndef->text) - 1) text_len = sizeof(ndef->text) - 1;
+                memcpy(ndef->text, ndef->raw + text_start, text_len);
+                ndef->text[text_len] = '\0';
             }
         }
     }
@@ -444,7 +453,9 @@ esp_err_t nfc_write_ndef(const nfc_ndef_t *ndef)
     buf[0] = 0x20;
     buf[1] = 0x01;
 
-    for (int i = 0; i <= ndef->raw_len / 16; i++) {
+    int max_blocks = ndef->raw_len / 16;
+    if (ndef->raw_len % 16 != 0) max_blocks++;
+    for (int i = 0; i < max_blocks; i++) {
         buf[2] = 4 + i;
         int copy = (ndef->raw_len - i * 16);
         if (copy > 16) copy = 16;
@@ -511,7 +522,7 @@ int nfc_dump_tag(uint8_t key[6], nfc_sector_t *sectors, int max)
 
     int read = 0;
     for (int i = 0; i < total; i++) {
-        if (nfc_read_sector(i, key, &sectors[i * 4]) == ESP_OK) {
+        if (nfc_read_sector(i, key, &sectors[i * NFC_BLOCKS_PER_SECTOR], NFC_BLOCKS_PER_SECTOR) == ESP_OK) {
             for (int b = 0; b < 4; b++) sectors[i * 4 + b].has_data = true;
             read++;
             vTaskDelay(pdMS_TO_TICKS(10));

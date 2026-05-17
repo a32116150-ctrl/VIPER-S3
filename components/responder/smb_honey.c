@@ -61,21 +61,23 @@ static void handle_client(int fd, struct sockaddr_in *client)
     char src_ip[16];
     inet_ntoa_r(client->sin_addr, src_ip, sizeof(src_ip));
 
-    uint8_t buf[4096];
-    int len = recv(fd, buf, sizeof(buf), 0);
-    if (len <= 0) { close(fd); return; }
+    uint8_t *buf = malloc(2048);
+    if (!buf) { close(fd); return; }
+    int len = recv(fd, buf, 2048, 0);
+    if (len <= 0) { free(buf); close(fd); return; }
 
     if (len >= 4 && buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0x00) {
         send(fd, SMBv2_NEGOTIATE_RESP, sizeof(SMBv2_NEGOTIATE_RESP), 0);
 
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        len = recv(fd, buf, sizeof(buf), 0);
+        len = recv(fd, buf, 2048, 0);
         if (len > 0) {
             extract_ntlmv2(buf, len, src_ip);
         }
     }
 
+    free(buf);
     close(fd);
 }
 

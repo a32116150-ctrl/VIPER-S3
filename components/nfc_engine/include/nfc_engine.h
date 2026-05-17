@@ -7,6 +7,7 @@
 #define NFC_TAG_TYPE_MAX 32
 #define NFC_NDEF_MAX_LEN 512
 #define NFC_SECTOR_COUNT 64
+#define NFC_BLOCKS_PER_SECTOR 4
 
 typedef enum {
     NFC_TAG_MIFARE_CLASSIC_1K,
@@ -47,7 +48,7 @@ esp_err_t nfc_engine_init(nfc_pn532_mode_t mode, int uart_tx, int uart_rx, int i
 esp_err_t nfc_engine_deinit(void);
 
 esp_err_t nfc_detect_tag(nfc_tag_info_t *info);
-esp_err_t nfc_read_sector(uint8_t sector, uint8_t key[6], nfc_sector_t *data);
+esp_err_t nfc_read_sector(uint8_t sector, uint8_t key[6], nfc_sector_t *data, int num_blocks);
 esp_err_t nfc_write_sector(uint8_t sector, uint8_t key[6], const nfc_sector_t *data);
 esp_err_t nfc_read_ndef(nfc_ndef_t *ndef);
 esp_err_t nfc_write_ndef(const nfc_ndef_t *ndef);

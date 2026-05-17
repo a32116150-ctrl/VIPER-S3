@@ -11,6 +11,8 @@ static const char *TAG = "BEACON";
 
 static TaskHandle_t s_beacon_task = NULL;
 static volatile bool s_running = false;
+static char **s_beacon_ssid_list = NULL;
+static volatile bool s_task_freeing_list = false;
 
 static const uint8_t BEACON_TEMPLATE[] = {
     0x80, 0x00, 0x00, 0x00,
@@ -82,6 +84,13 @@ static void beacon_flood_task(void *arg)
         if (delay_ms > 0) vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 
+    if (ssid_list) {
+        s_task_freeing_list = true;
+        for (int i = 0; ssid_list[i]; i++) free(ssid_list[i]);
+        free(ssid_list);
+        s_task_freeing_list = false;
+    }
+    s_beacon_ssid_list = NULL;
     ESP_LOGI(TAG, "Beacon flood stopped");
     s_beacon_task = NULL;
     vTaskDelete(NULL);
@@ -103,6 +112,7 @@ esp_err_t wifi_beacon_flood_start(const char **ssid_list, uint16_t count,
     }
     list[count] = NULL;
 
+    s_beacon_ssid_list = list;
     xTaskCreatePinnedToCore(beacon_flood_task, "beacon", 4096, list, 5,
                             &s_beacon_task, 0);
     return ESP_OK;
@@ -117,6 +127,11 @@ esp_err_t wifi_beacon_flood_stop(void)
             vTaskDelete(s_beacon_task);
             s_beacon_task = NULL;
         }
+    }
+    if (s_beacon_ssid_list && !s_task_freeing_list) {
+        for (int i = 0; s_beacon_ssid_list[i]; i++) free(s_beacon_ssid_list[i]);
+        free(s_beacon_ssid_list);
+        s_beacon_ssid_list = NULL;
     }
     return ESP_OK;
 }

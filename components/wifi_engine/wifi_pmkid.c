@@ -120,8 +120,21 @@ esp_err_t wifi_pmkid_harvest_start(const uint8_t *target_bssid)
             .callback = ch_hop_cb,
             .name = "pmkid_ch"
         };
-        esp_timer_create(&timer_args, &s_ctx.ch_timer);
-        esp_timer_start_periodic(s_ctx.ch_timer, 300000);
+        esp_err_t timer_ret = esp_timer_create(&timer_args, &s_ctx.ch_timer);
+        if (timer_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to create channel hop timer");
+            esp_wifi_set_promiscuous(false);
+            esp_wifi_set_promiscuous_rx_cb(NULL);
+            return timer_ret;
+        }
+        if (esp_timer_start_periodic(s_ctx.ch_timer, 300000) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start channel hop timer");
+            esp_timer_delete(s_ctx.ch_timer);
+            s_ctx.ch_timer = NULL;
+            esp_wifi_set_promiscuous(false);
+            esp_wifi_set_promiscuous_rx_cb(NULL);
+            return ESP_FAIL;
+        }
     } else {
         esp_wifi_set_channel(target_bssid[5], WIFI_SECOND_CHAN_NONE);
     }

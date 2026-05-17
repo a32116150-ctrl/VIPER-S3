@@ -38,7 +38,7 @@ static void md4_transform(uint32_t state[4], const uint8_t block[64])
     }
     for (int i = 0; i < 16; i++) {
         int k = (i % 4 == 0) ? 0 : (i % 4 == 1) ? 8 : (i % 4 == 2) ? 4 : 12;
-        uint32_t r = a + H(b, c, d) + x[k + (i % 4) * 4] + 0x6ED9EBA1;
+        uint32_t r = a + H(b, c, d) + x[k + i / 4] + 0x6ED9EBA1;
         a = d; d = c; c = b; b = LEFT_ROTATE(r, (i % 4 == 0) ? 3 : (i % 4 == 1) ? 9 : (i % 4 == 2) ? 11 : 15);
     }
 
@@ -170,7 +170,10 @@ esp_err_t crack_engine_crack_md5(const char *target_hex, const char *wordlist_pa
         if (llen > 1 && line[llen - 2] == '\r') line[llen - 2] = '\0';
         if (line[0] == '\0') continue;
 
-        mbedtls_md5((const unsigned char *)line, strlen(line), computed);
+        if (mbedtls_md5((const unsigned char *)line, strlen(line), computed) != 0) {
+            ESP_LOGW(TAG, "mbedtls_md5 failed on line %lu", (unsigned long)attempts);
+            continue;
+        }
         attempts++;
 
         if (memcmp(computed, target, 16) == 0) {
@@ -206,7 +209,10 @@ esp_err_t crack_engine_crack_sha1(const char *target_hex, const char *wordlist_p
         if (llen > 1 && line[llen - 2] == '\r') line[llen - 2] = '\0';
         if (line[0] == '\0') continue;
 
-        mbedtls_sha1((const unsigned char *)line, strlen(line), computed);
+        if (mbedtls_sha1((const unsigned char *)line, strlen(line), computed) != 0) {
+            ESP_LOGW(TAG, "mbedtls_sha1 failed on line %lu", (unsigned long)attempts);
+            continue;
+        }
         attempts++;
 
         if (memcmp(computed, target, 20) == 0) {
@@ -231,6 +237,7 @@ esp_err_t crack_engine_crack(const char *hash_str, hash_type_t type,
     result->type = type;
 
     uint64_t start = esp_timer_get_time();
+    uint32_t attempts_before = s_total_attempts;
     esp_err_t ret;
     char pass[64] = {0};
 
@@ -254,7 +261,7 @@ esp_err_t crack_engine_crack(const char *hash_str, hash_type_t type,
 
     result->found = (ret == ESP_OK);
     if (result->found) strncpy(result->password, pass, sizeof(result->password) - 1);
-    result->attempts = s_total_attempts;
+    result->attempts = s_total_attempts - attempts_before;
     result->duration_ms = (uint32_t)((esp_timer_get_time() - start) / 1000);
     return ret;
 }

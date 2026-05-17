@@ -325,6 +325,7 @@ static int mitm_peri_gap_event_cb(struct ble_gap_event *event, void *arg)
                         if (new_om) {
                             ble_gattc_notify_custom(s_peri_conn, attr_handle, new_om);
                         }
+                        os_mbuf_free_chain(event->notify_rx.om);
                         return 0;
                     }
                 }

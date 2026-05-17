@@ -12,12 +12,14 @@
 #include "ai_engine.h"
 #include "attack_orchestrator.h"
 #include "esp_http_server.h"
+#include "esp_https_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -29,24 +31,94 @@ static const char *TAG = "DASHBOARD";
 static httpd_handle_t s_server = NULL;
 static int s_ws_fds[MAX_WS_CLIENTS];
 static int s_ws_count = 0;
+static SemaphoreHandle_t s_ws_mutex = NULL;
 
 static char s_log_buf[16384];
 static size_t s_log_len = 0;
+
+#define API_KEY_MAX_LEN 64
+#define DASHBOARD_DEFAULT_PASSWORD "viper"
+static char s_api_key[API_KEY_MAX_LEN] = {0};
+static bool s_auth_enabled = false;
+
+static void load_api_key(void)
+{
+    uint8_t buf[2048] = {0};
+    size_t len = 0;
+    if (storage_read_file(FILE_CONFIG, buf, sizeof(buf) - 1, &len) != ESP_OK || len == 0) {
+        strncpy(s_api_key, DASHBOARD_DEFAULT_PASSWORD, API_KEY_MAX_LEN - 1);
+        s_api_key[API_KEY_MAX_LEN - 1] = '\0';
+        s_auth_enabled = true;
+        ESP_LOGI(TAG, "Dashboard auth enabled (default password)");
+        return;
+    }
+    buf[len] = '\0';
+    char *k = strstr((char *)buf, "\"dashboard_password\":");
+    if (!k) {
+        strncpy(s_api_key, DASHBOARD_DEFAULT_PASSWORD, API_KEY_MAX_LEN - 1);
+        s_api_key[API_KEY_MAX_LEN - 1] = '\0';
+        s_auth_enabled = true;
+        ESP_LOGI(TAG, "Dashboard auth enabled (no config, using default)");
+        return;
+    }
+    k += 21;
+    char *start = strchr(k, '"');
+    if (!start) {
+        strncpy(s_api_key, DASHBOARD_DEFAULT_PASSWORD, API_KEY_MAX_LEN - 1);
+        s_api_key[API_KEY_MAX_LEN - 1] = '\0';
+        s_auth_enabled = true;
+        ESP_LOGI(TAG, "Dashboard auth enabled (default)");
+        return;
+    }
+    start++;
+    char *end = strchr(start, '"');
+    if (!end) {
+        strncpy(s_api_key, DASHBOARD_DEFAULT_PASSWORD, API_KEY_MAX_LEN - 1);
+        s_api_key[API_KEY_MAX_LEN - 1] = '\0';
+        s_auth_enabled = true;
+        ESP_LOGI(TAG, "Dashboard auth enabled (default)");
+        return;
+    }
+    size_t pwlen = end - start;
+    if (pwlen >= API_KEY_MAX_LEN) pwlen = API_KEY_MAX_LEN - 1;
+    memcpy(s_api_key, start, pwlen);
+    s_api_key[pwlen] = '\0';
+    s_auth_enabled = (s_api_key[0] != '\0');
+    ESP_LOGI(TAG, "Dashboard auth %s (from config)", s_auth_enabled ? "enabled" : "disabled");
+}
+
+static esp_err_t auth_check(httpd_req_t *req)
+{
+    if (!s_auth_enabled) return ESP_OK;
+    char buf[API_KEY_MAX_LEN + 8] = {0};
+    size_t len = httpd_req_get_hdr_value_str(req, "X-API-Key", buf, sizeof(buf) - 1);
+    if (len == 0 || strcmp(buf, s_api_key) != 0) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
 
 /* ── WebSocket helpers ──────────────────────────── */
 
 static void ws_add_client(int fd)
 {
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        if (s_ws_fds[i] == 0) { s_ws_fds[i] = fd; s_ws_count++; return; }
+        if (s_ws_fds[i] == 0) { s_ws_fds[i] = fd; s_ws_count++; break; }
     }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
 }
 
 static void ws_remove_client(int fd)
 {
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        if (s_ws_fds[i] == fd) { s_ws_fds[i] = 0; s_ws_count--; return; }
+        if (s_ws_fds[i] == fd) { s_ws_fds[i] = 0; s_ws_count--; break; }
     }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
 }
 
 esp_err_t web_dashboard_broadcast(const char *event_type, const char *json_data)
@@ -62,11 +134,13 @@ esp_err_t web_dashboard_broadcast(const char *event_type, const char *json_data)
         .len = len,
     };
 
+    if (s_ws_mutex) xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (s_ws_fds[i] != 0) {
             httpd_ws_send_frame_async(s_server, s_ws_fds[i], &ws_msg);
         }
     }
+    if (s_ws_mutex) xSemaphoreGive(s_ws_mutex);
     return ESP_OK;
 }
 
@@ -122,6 +196,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
 
 static esp_err_t api_status_get(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[512];
     int len = snprintf(buf, sizeof(buf),
         "{\"heap_free\":%lu,\"heap_min\":%lu,\"uptime_ms\":%lld,\"wifi_mode\":%d,\"ws_clients\":%d}",
@@ -139,22 +214,24 @@ static esp_err_t api_status_get(httpd_req_t *req)
 
 static esp_err_t api_scan_get(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     viper_ap_t results[WIFI_MAX_SCAN_RESULTS];
     uint16_t count = WIFI_MAX_SCAN_RESULTS;
 
     wifi_scan_get_results(results, &count);
 
-    char *buf = malloc(count * 256 + 128);
+    size_t buf_size = count * 256 + 128;
+    char *buf = malloc(buf_size);
     if (!buf) {
         httpd_resp_send_500(req);
         return ESP_OK;
     }
 
-    int off = snprintf(buf, 4096, "{\"count\":%d,\"aps\":[", count);
+    int off = snprintf(buf, buf_size, "{\"count\":%d,\"aps\":[", count);
     for (int i = 0; i < count; i++) {
         char bssid[18];
         wifi_mac_to_str(results[i].bssid, bssid);
-        off += snprintf(buf + off, 4096 - off,
+        off += snprintf(buf + off, buf_size - off,
             "%c{\"ssid\":\"%s\",\"bssid\":\"%s\",\"ch\":%d,\"rssi\":%d,\"auth\":%d,\"hidden\":%d,\"vendor\":\"%s\"}",
             i > 0 ? ',' : ' ',
             results[i].ssid, bssid,
@@ -162,7 +239,7 @@ static esp_err_t api_scan_get(httpd_req_t *req)
             results[i].authmode, results[i].hidden,
             results[i].oui_vendor);
     }
-    off += snprintf(buf + off, 4096 - off, "]}");
+    off += snprintf(buf + off, buf_size - off, "]}");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
@@ -174,22 +251,24 @@ static esp_err_t api_scan_get(httpd_req_t *req)
 
 static esp_err_t api_clients_get(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     viper_client_t clients[WIFI_MAX_CLIENTS];
     uint16_t count = WIFI_MAX_CLIENTS;
 
     wifi_scan_get_clients(clients, &count);
 
-    char *buf = malloc(4096);
+    size_t bs = 4096;
+    char *buf = malloc(bs);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
-    int off = snprintf(buf, 4096, "{\"count\":%d,\"clients\":[", count);
+    int off = snprintf(buf, bs, "{\"count\":%d,\"clients\":[", count);
     for (int i = 0; i < count; i++) {
         char mac[18];
         wifi_mac_to_str(clients[i].mac, mac);
-        off += snprintf(buf + off, 4096 - off,
+        off += snprintf(buf + off, bs - off,
             "%c{\"mac\":\"%s\",\"rssi\":%d,\"vendor\":\"%s\"}",
             i > 0 ? ',' : ' ', mac, clients[i].rssi, clients[i].oui_vendor);
     }
-    off += snprintf(buf + off, 4096 - off, "]}");
+    off += snprintf(buf + off, bs - off, "]}");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
@@ -201,6 +280,7 @@ static esp_err_t api_clients_get(httpd_req_t *req)
 
 static esp_err_t api_attack_start(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[256];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -252,14 +332,17 @@ static esp_err_t api_attack_start(httpd_req_t *req)
             break;
     }
 
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_attack_stop(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     wifi_engine_stop_current();
     dashboard_log("Attack stopped");
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -268,12 +351,14 @@ static esp_err_t api_attack_stop(httpd_req_t *req)
 
 static esp_err_t api_captures_creds(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     uint8_t *buf = malloc(8192);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
     size_t len = 0;
     esp_err_t ret = storage_read_file(FILE_CREDS, buf, 8191, &len);
     if (ret != ESP_OK) {
         free(buf);
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"count\":0,\"entries\":[]}");
         return ESP_OK;
     }
@@ -291,12 +376,14 @@ static esp_err_t api_captures_creds(httpd_req_t *req)
 
 static esp_err_t api_captures_hashes(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     uint8_t *buf = malloc(8192);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
     size_t len = 0;
     esp_err_t ret = storage_read_file(FILE_HASHES, buf, 8191, &len);
     if (ret != ESP_OK) {
         free(buf);
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"count\":0,\"entries\":[]}");
         return ESP_OK;
     }
@@ -314,8 +401,10 @@ static esp_err_t api_captures_hashes(httpd_req_t *req)
 
 static esp_err_t api_captures_wipe(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     storage_wipe_captures();
     dashboard_log("Captures wiped");
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -324,6 +413,7 @@ static esp_err_t api_captures_wipe(httpd_req_t *req)
 
 static esp_err_t api_logs_get(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, s_log_buf, s_log_len);
     return ESP_OK;
@@ -333,6 +423,7 @@ static esp_err_t api_logs_get(httpd_req_t *req)
 
 static esp_err_t api_config_get(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     uint8_t buf[2048];
     size_t len = 0;
     esp_err_t ret = storage_read_file(FILE_CONFIG, buf, sizeof(buf) - 1, &len);
@@ -350,6 +441,7 @@ static esp_err_t api_config_get(httpd_req_t *req)
 
 static esp_err_t api_config_post(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[2048];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -357,6 +449,7 @@ static esp_err_t api_config_post(httpd_req_t *req)
 
     storage_write_file(FILE_CONFIG, (uint8_t *)buf, len, false);
     dashboard_log("Config updated");
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -425,9 +518,9 @@ static esp_err_t download_handler(httpd_req_t *req)
     if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) == ESP_OK) {
         type = qbuf;
     }
-    if (strstr(type, "creds")) return serve_file(req, FILE_CREDS, "application/json");
-    if (strstr(type, "hashes")) return serve_file(req, FILE_HASHES, "application/json");
-    if (strstr(type, "all")) {
+    if (strcmp(type, "creds") == 0) return serve_file(req, FILE_CREDS, "application/json");
+    if (strcmp(type, "hashes") == 0) return serve_file(req, FILE_HASHES, "application/json");
+    if (strcmp(type, "all") == 0) {
         char buf[256];
         int len = snprintf(buf, sizeof(buf),
             "Export not yet implemented.\n"
@@ -1181,12 +1274,45 @@ static esp_err_t api_orch_chain_stop(httpd_req_t *req);
 static esp_err_t api_orch_schedule(httpd_req_t *req);
 static esp_err_t api_orch_schedule_stop(httpd_req_t *req);
 
+/* ── API: Auth ────────────────────────────────────── */
+
+static esp_err_t api_auth_login(httpd_req_t *req)
+{
+    char buf[128];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
+    buf[len] = '\0';
+
+    char key[API_KEY_MAX_LEN] = {0};
+    char *k = strstr(buf, "\"key\":");
+    if (k) {
+        k += 6;
+        char *s = strchr(k, '"');
+        if (s) {
+            s++;
+            int i = 0;
+            while (*s && *s != '"' && i < API_KEY_MAX_LEN - 1) key[i++] = *s++;
+        }
+    }
+
+    if (!s_auth_enabled || strcmp(key, s_api_key) == 0) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":true}");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"invalid key\"}");
+    }
+    return ESP_OK;
+}
+
 /* ── URI Registration ───────────────────────────── */
 
 static const httpd_uri_t s_uris[] = {
     { .uri = "/",         .method = HTTP_GET,    .handler = root_get_handler },
     { .uri = "/ping",     .method = HTTP_GET,    .handler = ping_get_handler },
     { .uri = "/ws",       .method = HTTP_GET,    .handler = ws_handler, .is_websocket = true },
+    { .uri = "/api/auth", .method = HTTP_POST,   .handler = api_auth_login },
     { .uri = "/api/status",       .method = HTTP_GET,  .handler = api_status_get },
     { .uri = "/api/scan",         .method = HTTP_GET,  .handler = api_scan_get },
     { .uri = "/api/clients",      .method = HTTP_GET,  .handler = api_clients_get },
@@ -1245,6 +1371,7 @@ static const httpd_uri_t s_uris[] = {
 
 static esp_err_t api_responder_start(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len > 0) buf[len] = '\0';
@@ -1258,21 +1385,25 @@ static esp_err_t api_responder_start(httpd_req_t *req)
 
     responder_start(proto);
     dashboard_log("Responder started (proto=%d)", proto);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_responder_stop(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     uint32_t count = responder_get_poisoned_count();
     responder_stop();
     dashboard_log("Responder stopped (%lu poisoned)", count);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_responder_status(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[128];
     snprintf(buf, sizeof(buf), "{\"running\":%d,\"poisoned\":%lu}",
              responder_is_running(), responder_get_poisoned_count());
@@ -1285,16 +1416,20 @@ static esp_err_t api_responder_status(httpd_req_t *req)
 
 static esp_err_t api_smb_start(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     smb_honeypot_start(445);
     dashboard_log("SMB honeypot started");
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_smb_stop(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     smb_honeypot_stop();
     dashboard_log("SMB honeypot stopped");
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -1303,6 +1438,7 @@ static esp_err_t api_smb_stop(httpd_req_t *req)
 
 static esp_err_t api_crack_start(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[512];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -1324,7 +1460,7 @@ static esp_err_t api_crack_start(httpd_req_t *req)
         if (w) { w++; int i = 0; while (*w && *w != '"' && i < 127) wordlist[i++] = *w++; }
     }
 
-    if (!hash[0]) { httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"no hash\"}"); return ESP_OK; }
+    if (!hash[0]) { httpd_resp_set_type(req, "application/json"); httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"no hash\"}"); return ESP_OK; }
 
     const char *wl = wordlist[0] ? wordlist : FILE_WORDLIST_10K;
 
@@ -1346,6 +1482,7 @@ static esp_err_t api_crack_start(httpd_req_t *req)
 
 static esp_err_t api_crack_status(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     uint32_t cracked, attempts;
     crack_engine_get_stats(&cracked, &attempts);
 
@@ -1364,6 +1501,7 @@ static esp_err_t api_crack_status(httpd_req_t *req)
 
 static esp_err_t api_downgrade_start(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len > 0) buf[len] = '\0';
@@ -1376,12 +1514,14 @@ static esp_err_t api_downgrade_start(httpd_req_t *req)
     downgrade_set_evil_twin_wpa2(ssid, ch);
     downgrade_engine_init(DOWNGRADE_SSL);
     dashboard_log("WPA3→WPA2 downgrade: %s", ssid);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_canary_create(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[256];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -1410,18 +1550,20 @@ static esp_err_t api_canary_create(httpd_req_t *req)
 
 static esp_err_t api_canary_list(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     canary_token_t tokens[32];
     int count = canary_injector_get_tokens(tokens, 32);
 
-    char *buf = malloc(count * 256 + 64);
+    size_t buf_size = count * 256 + 64;
+    char *buf = malloc(buf_size);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
-    int off = snprintf(buf, 4096, "{\"count\":%d,\"tokens\":[", count);
+    int off = snprintf(buf, buf_size, "{\"count\":%d,\"tokens\":[", count);
     for (int i = 0; i < count; i++) {
-        off += snprintf(buf + off, 4096 - off,
+        off += snprintf(buf + off, buf_size - off,
             "%c{\"token\":\"%s\",\"hits\":%lu,\"last_seen\":%llu}",
             i > 0 ? ',' : ' ', tokens[i].token, tokens[i].hit_count, tokens[i].last_seen_at);
     }
-    off += snprintf(buf + off, 4096 - off, "]}");
+    off += snprintf(buf + off, buf_size - off, "]}");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
     free(buf);
@@ -1430,23 +1572,25 @@ static esp_err_t api_canary_list(httpd_req_t *req)
 
 static esp_err_t api_behavioral_results(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     fingerprint_result_t results[16];
     int count = behavioral_get_results(results, 16);
 
-    char *buf = malloc(count * 256 + 64);
+    size_t bs = count * 256 + 64;
+    char *buf = malloc(bs);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
 
     behavioral_classify();
 
-    int off = snprintf(buf, 4096, "{\"count\":%d,\"results\":[", count);
+    int off = snprintf(buf, bs, "{\"count\":%d,\"results\":[", count);
     for (int i = 0; i < count; i++) {
-        off += snprintf(buf + off, 4096 - off,
+        off += snprintf(buf + off, bs - off,
             "%c{\"app\":\"%s\",\"confidence\":%.1f,\"pkts\":%lu,\"avg_size\":%lu,\"duration\":%lu}",
             i > 0 ? ',' : ' ', app_type_to_string(results[i].app),
             results[i].confidence, results[i].packet_count,
             results[i].avg_packet_size, results[i].duration_sec);
     }
-    off += snprintf(buf + off, 4096 - off, "]}");
+    off += snprintf(buf + off, bs - off, "]}");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
     free(buf);
@@ -1457,22 +1601,24 @@ static esp_err_t api_behavioral_results(httpd_req_t *req)
 
 static esp_err_t api_ble_proprietary(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     proprietary_scan_result_t results[32];
     int count = ble_scan_proprietary_get_results(results, 32);
 
-    char *buf = malloc(count * 256 + 64);
+    size_t bs = count * 256 + 64;
+    char *buf = malloc(bs);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
 
-    int off = snprintf(buf, 4096, "{\"count\":%d,\"results\":[", count);
+    int off = snprintf(buf, bs, "{\"count\":%d,\"results\":[", count);
     for (int i = 0; i < count; i++) {
-        off += snprintf(buf + off, 4096 - off,
+        off += snprintf(buf + off, bs - off,
             "%c{\"type\":\"%s\",\"battery\":%d,\"apple\":%d,\"samsung\":%d,\"tile\":%d,\"findmy\":%d,\"swiftpair\":%d}",
             i > 0 ? ',' : ' ',
             results[i].type, results[i].battery_level,
             results[i].is_apple, results[i].is_samsung,
             results[i].is_tile, results[i].is_findmy, results[i].is_swiftpair);
     }
-    off += snprintf(buf + off, 4096 - off, "]}");
+    off += snprintf(buf + off, bs - off, "]}");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
@@ -1484,6 +1630,7 @@ static esp_err_t api_ble_proprietary(httpd_req_t *req)
 
 static esp_err_t api_ble_mitm_start(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[256];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len > 0) buf[len] = '\0';
@@ -1498,8 +1645,10 @@ static esp_err_t api_ble_mitm_start(httpd_req_t *req)
     esp_err_t ret = ble_mitm_start(NULL, target_name[0] ? target_name : NULL, 5000);
     if (ret == ESP_OK) {
         dashboard_log("BLE MITM started (target: %s)", target_name[0] ? target_name : "any");
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":true}");
     } else {
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to start\"}");
     }
     return ESP_OK;
@@ -1507,14 +1656,17 @@ static esp_err_t api_ble_mitm_start(httpd_req_t *req)
 
 static esp_err_t api_ble_mitm_stop(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     ble_mitm_stop();
     dashboard_log("BLE MITM stopped");
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_ble_mitm_status(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     ble_mitm_status_t st = ble_mitm_get_status();
     char addr_str[18];
     snprintf(addr_str, sizeof(addr_str), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -1533,26 +1685,28 @@ static esp_err_t api_ble_mitm_status(httpd_req_t *req)
 
 static esp_err_t api_ble_mitm_services(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     mitm_service_t svcs[8];
     int count = ble_mitm_get_discovered_services(svcs, 8);
 
-    char *buf = malloc(count * 1024 + 64);
+    size_t bs = count * 1024 + 64;
+    char *buf = malloc(bs);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
 
-    int off = snprintf(buf, 8192, "{\"count\":%d,\"services\":[", count);
+    int off = snprintf(buf, bs, "{\"count\":%d,\"services\":[", count);
     for (int i = 0; i < count; i++) {
-        off += snprintf(buf + off, 8192 - off,
+        off += snprintf(buf + off, bs - off,
             "%c{\"start\":%d,\"end\":%d,\"chars\":[",
             i > 0 ? ',' : ' ', svcs[i].start_handle, svcs[i].end_handle);
         for (int c = 0; c < svcs[i].char_count; c++) {
-            off += snprintf(buf + off, 8192 - off,
+            off += snprintf(buf + off, bs - off,
                 "%c{\"handle\":%d,\"uuid\":\"0x%04x\",\"props\":%d}",
                 c > 0 ? ',' : ' ', svcs[i].chars[c].handle,
                 svcs[i].chars[c].uuid, svcs[i].chars[c].properties);
         }
-        off += snprintf(buf + off, 8192 - off, "]}");
+        off += snprintf(buf + off, bs - off, "]}");
     }
-    off += snprintf(buf + off, 8192 - off, "]}");
+    off += snprintf(buf + off, bs - off, "]}");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
@@ -1564,9 +1718,11 @@ static esp_err_t api_ble_mitm_services(httpd_req_t *req)
 
 static esp_err_t api_ir_capture(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     ir_capture_t cap;
     esp_err_t ret = ir_capture_start(5000);
     if (ret != ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"capture_start_failed\"}");
         return ESP_OK;
     }
@@ -1580,9 +1736,11 @@ static esp_err_t api_ir_capture(httpd_req_t *req)
         char resp[128];
         snprintf(resp, sizeof(resp), "{\"ok\":true,\"proto\":%d,\"addr\":%u,\"cmd\":%u}",
                  cap.protocol, cap.address, cap.command);
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, resp);
     } else {
         ir_capture_stop();
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"timeout\"}");
     }
     return ESP_OK;
@@ -1590,6 +1748,7 @@ static esp_err_t api_ir_capture(httpd_req_t *req)
 
 static esp_err_t api_ir_send(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[128];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -1608,12 +1767,14 @@ static esp_err_t api_ir_send(httpd_req_t *req)
     else if (proto == IR_PROTOCOL_SONY) ir_send_sony(cmd, addr, 12);
 
     dashboard_log("IR send: proto=%d addr=0x%04x cmd=0x%02x", proto, addr, cmd);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_ir_learned(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char names[16][64];
     int count = ir_learned_list(names, 16);
     char *buf = malloc(count * 80 + 32);
@@ -1624,6 +1785,7 @@ static esp_err_t api_ir_learned(httpd_req_t *req)
         off += sprintf(buf + off, "%c\"%s\"", i > 0 ? ',' : ' ', names[i]);
     }
     sprintf(buf + off, "]}");
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, buf);
     free(buf);
     return ESP_OK;
@@ -1631,6 +1793,7 @@ static esp_err_t api_ir_learned(httpd_req_t *req)
 
 static esp_err_t api_nfc_detect(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     nfc_tag_info_t info;
     if (nfc_detect_tag(&info) == ESP_OK) {
         char uid_str[24] = {0};
@@ -1639,8 +1802,10 @@ static esp_err_t api_nfc_detect(httpd_req_t *req)
         char resp[256];
         snprintf(resp, sizeof(resp), "{\"present\":true,\"type\":\"%s\",\"uid\":\"%s\",\"sectors\":%d}",
                  info.tag_type, uid_str, info.sector_count);
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, resp);
     } else {
+        httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"present\":false}");
     }
     return ESP_OK;
@@ -1648,10 +1813,12 @@ static esp_err_t api_nfc_detect(httpd_req_t *req)
 
 static esp_err_t api_nfc_clone(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     uint8_t key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     esp_err_t ret = nfc_clone_tag(key);
     char resp[64];
     snprintf(resp, sizeof(resp), "{\"ok\":%d}", ret == ESP_OK);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, resp);
     if (ret == ESP_OK) dashboard_log("NFC tag cloned successfully");
     return ESP_OK;
@@ -1661,6 +1828,7 @@ static esp_err_t api_nfc_clone(httpd_req_t *req)
 
 static esp_err_t api_usb_status(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     const char *modes[] = {"HID","CDC","RNDIS","MSC","COMBO"};
     int mode = (int)usb_engine_get_mode();
     char buf[192];
@@ -1676,6 +1844,7 @@ static esp_err_t api_usb_status(httpd_req_t *req)
 
 static esp_err_t api_usb_type(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[512];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -1693,19 +1862,23 @@ static esp_err_t api_usb_type(httpd_req_t *req)
             usb_hid_send_string(text);
         }
     }
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_usb_release(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     usb_hid_release_all();
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_usb_ducky(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[2048];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -1723,22 +1896,25 @@ static esp_err_t api_usb_ducky(httpd_req_t *req)
             usb_ducky_execute_string(script);
         }
     }
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_usb_payloads(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char names[32][64];
     int count = usb_payload_list(names, 32);
 
-    char *buf = malloc(count * 80 + 32);
+    size_t bs = count * 80 + 32;
+    char *buf = malloc(bs);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
 
-    int off = snprintf(buf, 4096, "{\"count\":%d,\"payloads\":[", count);
+    int off = snprintf(buf, bs, "{\"count\":%d,\"payloads\":[", count);
     for (int i = 0; i < count; i++)
-        off += snprintf(buf + off, 4096 - off, "%c\"%s\"", i > 0 ? ',' : ' ', names[i]);
-    off += snprintf(buf + off, 4096 - off, "]}");
+        off += snprintf(buf + off, bs - off, "%c\"%s\"", i > 0 ? ',' : ' ', names[i]);
+    off += snprintf(buf + off, bs - off, "]}");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
@@ -1761,21 +1937,23 @@ static const char *ai_twin_type_name(ai_twin_type_t t)
 
 static esp_err_t api_ai_twins(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     ai_twin_profile_t twins[16];
     int count = ai_twin_list(twins, 16);
 
-    char *buf = malloc(count * 256 + 64);
+    size_t bs = count * 256 + 64;
+    char *buf = malloc(bs);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
 
-    int off = snprintf(buf, 4096, "{\"count\":%d,\"twins\":[", count);
+    int off = snprintf(buf, bs, "{\"count\":%d,\"twins\":[", count);
     for (int i = 0; i < count; i++) {
-        off += snprintf(buf + off, 4096 - off,
+        off += snprintf(buf + off, bs - off,
             "%c{\"name\":\"%s\",\"type\":\"%s\",\"usage\":%lu}",
             i > 0 ? ',' : ' ', twins[i].name,
             ai_twin_type_name(twins[i].type),
             twins[i].usage_count);
     }
-    off += snprintf(buf + off, 4096 - off, "]}");
+    off += snprintf(buf + off, bs - off, "]}");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, off);
@@ -1785,6 +1963,7 @@ static esp_err_t api_ai_twins(httpd_req_t *req)
 
 static esp_err_t api_ai_twins_delete(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -1795,12 +1974,14 @@ static esp_err_t api_ai_twins_delete(httpd_req_t *req)
     if (i) { i = strchr(i + 7, ':'); if (i) idx = atoi(i + 1); }
 
     ai_twin_delete(idx);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_ai_twins_spawn(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[128];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -1814,12 +1995,14 @@ static esp_err_t api_ai_twins_spawn(httpd_req_t *req)
     if (d) { d = strchr(d + 10, ':'); if (d) dur = atoi(d + 1); }
 
     ai_twin_spawn_ble(idx, dur);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_ai_twins_spawn_all(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -1830,12 +2013,14 @@ static esp_err_t api_ai_twins_spawn_all(httpd_req_t *req)
     if (d) { d = strchr(d + 10, ':'); if (d) dur = atoi(d + 1); }
 
     ai_twin_spawn_all(dur);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_ai_models(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     const ai_decision_tree_t *tree = ai_get_app_classifier();
     const ai_knn_model_t *knn = ai_get_ble_device_classifier();
 
@@ -1865,6 +2050,7 @@ static esp_err_t api_ai_models(httpd_req_t *req)
 
 static esp_err_t api_orch_health(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     system_health_t h;
     attack_orchestrator_get_health(&h);
 
@@ -1882,6 +2068,7 @@ static esp_err_t api_orch_health(httpd_req_t *req)
 
 static esp_err_t api_orch_chain_run(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len > 0) buf[len] = '\0';
@@ -1892,20 +2079,24 @@ static esp_err_t api_orch_chain_run(httpd_req_t *req)
 
     attack_orchestrator_run_chain((attack_chain_t)chain);
     dashboard_log("Orchestrator: chain %d started", chain);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_orch_chain_stop(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     attack_orchestrator_stop_chain();
     dashboard_log("Orchestrator: chain stopped");
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_orch_schedule(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     char buf[64];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) { httpd_resp_send_500(req); return ESP_OK; }
@@ -1920,14 +2111,17 @@ static esp_err_t api_orch_schedule(httpd_req_t *req)
 
     attack_orchestrator_schedule(interval, (attack_chain_t)chain);
     dashboard_log("Orchestrator: scheduled chain %d every %lu ms", chain, interval);
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
 static esp_err_t api_orch_schedule_stop(httpd_req_t *req)
 {
+    if (auth_check(req) != ESP_OK) return ESP_OK;
     attack_orchestrator_unschedule();
     dashboard_log("Orchestrator: schedule stopped");
+    httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -1959,11 +2153,36 @@ static void start_watchdog(void)
     watchdog_started = true;
 }
 
-/* ── Retry with conservative config ───────────────── */
+/* ── Try HTTPS first, fall back to HTTP ──────────── */
 
 static esp_err_t try_start_server(void)
 {
-    /* Try full config first */
+    extern const unsigned char servercert_pem_start[] asm("_binary_servercert_pem_start");
+    extern const unsigned char servercert_pem_end[]   asm("_binary_servercert_pem_end");
+    extern const unsigned char prvtkey_pem_start[] asm("_binary_prvtkey_pem_start");
+    extern const unsigned char prvtkey_pem_end[]   asm("_binary_prvtkey_pem_end");
+
+    httpd_ssl_config_t ssl_cfg = HTTPD_SSL_CONFIG_DEFAULT();
+    ssl_cfg.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
+    ssl_cfg.port_secure = 443;
+    ssl_cfg.httpd.max_open_sockets = 8;
+    ssl_cfg.httpd.max_uri_handlers = sizeof(s_uris) / sizeof(s_uris[0]);
+    ssl_cfg.httpd.lru_purge_enable = true;
+    ssl_cfg.httpd.stack_size = 8192;
+    ssl_cfg.servercert = servercert_pem_start;
+    ssl_cfg.servercert_len = servercert_pem_end - servercert_pem_start;
+    ssl_cfg.prvtkey_pem = prvtkey_pem_start;
+    ssl_cfg.prvtkey_len = prvtkey_pem_end - prvtkey_pem_start;
+
+    esp_err_t ret = httpd_ssl_start(&s_server, &ssl_cfg);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "HTTPS server started on port 443");
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "HTTPS server failed (%s) — falling back to HTTP...", esp_err_to_name(ret));
+
+    /* Fall back to plain HTTP */
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
     cfg.max_open_sockets = 8;
@@ -1971,18 +2190,17 @@ static esp_err_t try_start_server(void)
     cfg.lru_purge_enable = true;
     cfg.stack_size = 8192;
 
-    uint32_t free_before = esp_get_free_heap_size();
-    uint32_t block_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    ESP_LOGI(TAG, "Init starting — heap free: %lu KB, largest internal block: %lu",
-             free_before / 1024, block_before);
+    uint32_t free_retry = esp_get_free_heap_size();
+    uint32_t block_retry = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "HTTP fallback — heap free: %lu KB, largest block: %lu",
+             free_retry / 1024, block_retry);
 
-    esp_err_t ret = httpd_start(&s_server, &cfg);
+    ret = httpd_start(&s_server, &cfg);
     if (ret == ESP_OK) return ESP_OK;
 
     ESP_LOGW(TAG, "httpd_start (8 sockets, 8KB stack) failed: %s — retrying with 4 sockets, 6KB stack...",
              esp_err_to_name(ret));
 
-    /* Retry with smaller config */
     httpd_config_t cfg2 = HTTPD_DEFAULT_CONFIG();
     cfg2.server_port = 80;
     cfg2.max_open_sockets = 4;
@@ -1990,18 +2208,13 @@ static esp_err_t try_start_server(void)
     cfg2.lru_purge_enable = true;
     cfg2.stack_size = 6144;
 
-    uint32_t free_retry = esp_get_free_heap_size();
-    uint32_t block_retry = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    ESP_LOGI(TAG, "Retry — heap free: %lu KB, largest block: %lu",
-             free_retry / 1024, block_retry);
-
     ret = httpd_start(&s_server, &cfg2);
     if (ret == ESP_OK) {
-        ESP_LOGW(TAG, "Server started with reduced config (4 sockets, 3KB stack)");
+        ESP_LOGW(TAG, "HTTP server started with reduced config (4 sockets, 3KB stack)");
         return ESP_OK;
     }
 
-    ESP_LOGE(TAG, "httpd_start FAILED after retry: %s (heap: %lu KB, block: %lu)",
+    ESP_LOGE(TAG, "httpd_start FAILED after fallback: %s (heap: %lu KB, block: %lu)",
              esp_err_to_name(ret), free_retry / 1024, block_retry);
     return ret;
 }
@@ -2011,6 +2224,12 @@ static esp_err_t try_start_server(void)
 esp_err_t web_dashboard_init(void)
 {
     if (s_server) return ESP_OK;
+
+    if (!s_ws_mutex) {
+        s_ws_mutex = xSemaphoreCreateMutex();
+    }
+
+    load_api_key();
 
     esp_err_t ret = try_start_server();
     if (ret != ESP_OK) return ret;

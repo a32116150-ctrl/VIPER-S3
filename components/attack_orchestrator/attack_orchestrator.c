@@ -22,6 +22,7 @@ static TaskHandle_t s_chain_task = NULL;
 static TaskHandle_t s_monitor_task = NULL;
 static TaskHandle_t s_scheduler_task = NULL;
 
+static volatile bool s_monitor_running = false;
 static bool s_scheduled = false;
 static uint32_t s_schedule_interval = 0;
 static attack_chain_t s_schedule_chain = CHAIN_NONE;
@@ -383,20 +384,32 @@ static void health_log(void)
 
 static void check_credential_triggers(void)
 {
-    uint8_t buf[64];
-    size_t len = 0;
-    if (storage_read_file(FILE_CREDS, buf, sizeof(buf), &len) == ESP_OK && len > 0) {
-        if (len > s_last_cred_count) {
-            web_dashboard_broadcast("new_credential", "{}");
-            s_last_cred_count = len;
+    size_t cred_size = 0;
+    {
+        FILE *f = fopen(FILE_CREDS, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            cred_size = ftell(f);
+            fclose(f);
         }
     }
+    if (cred_size > s_last_cred_count) {
+        web_dashboard_broadcast("new_credential", "{}");
+        s_last_cred_count = cred_size;
+    }
 
-    if (storage_read_file(FILE_HASHES, buf, sizeof(buf), &len) == ESP_OK && len > 0) {
-        if (len > s_last_hash_count) {
-            web_dashboard_broadcast("new_hash", "{}");
-            s_last_hash_count = len;
+    size_t hash_size = 0;
+    {
+        FILE *f = fopen(FILE_HASHES, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            hash_size = ftell(f);
+            fclose(f);
         }
+    }
+    if (hash_size > s_last_hash_count) {
+        web_dashboard_broadcast("new_hash", "{}");
+        s_last_hash_count = hash_size;
     }
 }
 
@@ -422,7 +435,7 @@ static void monitor_task(void *arg)
 {
     int tick = 0;
 
-    while (1) {
+    while (s_monitor_running) {
         tick++;
 
         if (tick % 5 == 0) {
@@ -441,8 +454,11 @@ static void monitor_task(void *arg)
 
         attack_orchestrator_check_triggers();
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
     }
+
+    s_monitor_task = NULL;
+    vTaskDelete(NULL);
 }
 
 /* ── Public API ─────────────────────────────────── */
@@ -452,6 +468,7 @@ esp_err_t attack_orchestrator_start(void)
     if (s_running) return ESP_OK;
     s_running = true;
 
+    s_monitor_running = true;
     xTaskCreatePinnedToCore(monitor_task, "orchestrator", 4096, NULL, 3,
                             &s_monitor_task, 1);
 
@@ -463,11 +480,13 @@ esp_err_t attack_orchestrator_start(void)
 esp_err_t attack_orchestrator_stop(void)
 {
     s_running = false;
+    s_monitor_running = false;
     attack_orchestrator_stop_chain();
     if (s_monitor_task) {
-        vTaskDelete(s_monitor_task);
-        s_monitor_task = NULL;
+        xTaskNotifyGive(s_monitor_task);
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
+    s_monitor_task = NULL;
     ESP_LOGI(TAG, "Attack orchestrator stopped");
     return ESP_OK;
 }

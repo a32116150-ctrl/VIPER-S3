@@ -39,17 +39,14 @@ esp_err_t wifi_engine_init(void) {
                               .authmode = WIFI_AUTH_WPA2_PSK,
                               .channel = 1,
                               .beacon_interval = 100,
+                              .pmf_cfg = {
+                                  .required = false,
+                              },
                           }};
   ret = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "esp_wifi_set_config failed (%s)", esp_err_to_name(ret));
     return ret;
-  }
-
-  ret = esp_wifi_disable_pmf_config(WIFI_IF_AP);
-  if (ret != ESP_OK) {
-    ESP_LOGW(TAG, "esp_wifi_disable_pmf_config failed (%s) — continuing",
-             esp_err_to_name(ret));
   }
 
   ret = esp_wifi_start();

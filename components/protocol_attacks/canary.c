@@ -51,9 +51,9 @@ static void load_canaries(void)
     while (fgets(line, sizeof(line), f) && s_canary_count < MAX_CANARIES) {
         canary_token_t *c = &s_canaries[s_canary_count];
         const char *t = strstr(line, "\"token\":\"");
-        if (t) { t += 9; int i = 0; while (*t && *t != '"' && i < 63) c->token[i++] = *t++; }
+        if (t) { t += 9; int i = 0; while (*t && *t != '"' && i < 63) c->token[i++] = *t++; c->token[i] = '\0'; }
         const char *u = strstr(line, "\"target\":\"");
-        if (u) { u += 10; int i = 0; while (*u && *u != '"' && i < 255) c->target_url[i++] = *u++; }
+        if (u) { u += 10; int i = 0; while (*u && *u != '"' && i < 255) c->target_url[i++] = *u++; c->target_url[i] = '\0'; }
         s_canary_count++;
     }
     fclose(f);

@@ -102,5 +102,5 @@ esp_err_t dns_spoof_stop(void);
 void      wifi_mac_to_str(const uint8_t *mac, char *out); /* "AA:BB:CC:DD:EE:FF" */
 bool      wifi_mac_is_broadcast(const uint8_t *mac);
 esp_err_t wifi_set_channel(uint8_t channel);
-esp_err_t wifi_set_mac(const uint8_t *mac);
+
 esp_err_t wifi_randomize_mac(void);

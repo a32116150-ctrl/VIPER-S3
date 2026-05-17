@@ -100,7 +100,7 @@ esp_err_t wifi_scan_start(void)
 
     ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_cfg, true));
 
-    uint16_t ap_count = 0;
+    uint16_t ap_count = WIFI_MAX_SCAN_RESULTS;
     wifi_ap_record_t *records = malloc(WIFI_MAX_SCAN_RESULTS * sizeof(wifi_ap_record_t));
     if (!records) {
         s_scanning = false;

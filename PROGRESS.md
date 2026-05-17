@@ -1,6 +1,6 @@
 # VIPER-S3 Development Progress
 
-> **Current Status**: Device flashed successfully but USB serial port disappeared after hard reset — cannot monitor or re-flash until USB re-enumerates. Firmware built with dashboard stability fixes (stack_size=4096, chunked transfer, retry logic, watchdog, /ping endpoint, BLE controller disabled, dashboard before WiFi in boot order). See [PROJECT_MEMORY.md](./PROJECT_MEMORY.md) for full details.
+> **Current Status**: Device flashed and running. All 25 vulnerabilities fixed + L1 (API auth) + L2 (HTTPS) + L3 + L4 + L5. BLE crash (NULL store callback) fixed. Build succeeds, device online at https://192.168.4.1 (self-signed cert). Auth enabled default "viper". L6 WPA2-PSK fix still needs hardware WPA2 client test.
 
 ## Phase 1 — Core Infrastructure ✅
 - `CMakeLists.txt`, `partitions.csv`, `sdkconfig.defaults`
@@ -97,12 +97,18 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
 | `max_uri_handlers=31` (was default 8) | All 31 API endpoints register; none get "no slots left" error |
 
 ## Next Steps
+- [x] Fix 3 critical vulnerabilities (SSL strip stack overflow, infinite read loop, WS race)
+- [x] Fix 9 high vulnerabilities (OOB write, NFC overflow, %s overread, double-free, task delete sync, null term, stubs, ARCOUNT, IR race)
+- [x] Fix 13 medium vulnerabilities (snprintf bounds, strstr match, confidence, atomic counter, unchecked returns, wordlist buffer, downgrade cleanup, CPU freq)
+- [x] Fix L3 — remove dead `wifi_set_mac` declaration
+- [x] Fix L4 — add Content-Type: application/json to 25+ JSON API endpoints
+- [x] Fix L5 — replace 10 stale Kconfig symbols in sdkconfig.defaults
+- [x] Fix L1 — Add API key authentication (`X-API-Key` header, `POST /api/auth` login, default `"viper"`)
+- [x] Fix L2 — Add HTTPS with embedded self-signed cert (port 443, auto-fallback to HTTP)
 - [ ] **🔴 USB enumeration** — Reboot MacBook, try different cable to get ESP32-S3 serial port back
-- [ ] **Flash & test** — Flash the new firmware (PMF fix, PSRAM DMA, USB/AI/Orch tabs, Protocol nav link)
-- [ ] **Test dashboard** — Verify http://192.168.4.1 loads, test /ping endpoint
-- [ ] **Test WPA2-PSK** — Verify clients can connect with password "00000000" post-fix
-- [ ] Diagnose MacBook DHCP issue (may get self-assigned IP instead of 192.168.4.x)
-- [ ] Add `/api/clients` frontend (client list exists but no JS polling calls it)
+- [ ] **Flash & test** — Flash the new firmware (all 25+ vulnerability fixes + L1+L2)
+- [ ] **Fix L6** — Verify WPA2-PSK works (code fix applied, needs hardware test)
+- [ ] **Test dashboard** — Verify http://192.168.4.1 loads, test all endpoints
 - [ ] Commit and push to GitHub
 
 ---

@@ -5,24 +5,25 @@
 #include "lwip/inet.h"
 #include "wifi_engine.h"
 #include <string.h>
+#include <stdatomic.h>
 
 static const char *TAG = "EVILTWIN";
 static bool s_running = false;
 static evil_twin_cfg_t s_cfg = {0};
-static uint8_t s_client_count = 0;
+static atomic_uint_fast8_t s_client_count = 0;
 
 static void wifi_ap_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data) {
   if (event_id == WIFI_EVENT_AP_STACONNECTED) {
     wifi_event_ap_staconnected_t *e =
         (wifi_event_ap_staconnected_t *)event_data;
-    s_client_count++;
+    atomic_fetch_add(&s_client_count, 1);
     char mac_str[18];
     wifi_mac_to_str(e->mac, mac_str);
-    ESP_LOGI(TAG, "Client CONNECTED → %s (total: %d)", mac_str, s_client_count);
+    ESP_LOGI(TAG, "Client CONNECTED → %s (total: %d)", mac_str, atomic_load(&s_client_count));
   } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
-    if (s_client_count > 0)
-      s_client_count--;
+    if (atomic_load(&s_client_count) > 0)
+      atomic_fetch_sub(&s_client_count, 1);
   }
 }
 
@@ -78,10 +79,14 @@ esp_err_t wifi_eviltwin_stop(void) {
   captive_portal_stop();
   http_sniffer_stop();
   wifi_deauth_stop();
+  esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED,
+                               wifi_ap_event_handler);
+  esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED,
+                               wifi_ap_event_handler);
   s_running = false;
   s_client_count = 0;
   ESP_LOGI(TAG, "Evil Twin stopped");
   return ESP_OK;
 }
 
-uint8_t wifi_eviltwin_get_client_count(void) { return s_client_count; }
+uint8_t wifi_eviltwin_get_client_count(void) { return atomic_load(&s_client_count); }

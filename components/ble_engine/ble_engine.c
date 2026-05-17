@@ -8,6 +8,7 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "host/ble_store.h"
 #include <string.h>
 
 static const char *TAG = "BLE";
@@ -16,8 +17,6 @@ static bool s_initialized = false;
 static volatile bool s_synced = false;
 
 static const char *s_device_name = "VIPER-S3";
-
-static void ble_store_config_init(void);
 
 static void ble_on_sync(void)
 {
@@ -58,7 +57,8 @@ esp_err_t ble_engine_init(void)
 
     ble_hs_cfg.sync_cb = ble_on_sync;
 
-    ble_store_config_init();
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+    ble_hs_cfg.store_status_arg = NULL;
 
     ble_uart_init();
 
@@ -85,7 +85,4 @@ esp_err_t ble_engine_deinit(void)
 
 bool ble_engine_is_synced(void) { return s_synced; }
 
-void ble_store_config_init(void)
-{
-    ble_store_util_status_rr(NULL, NULL);
-}
+

@@ -6,6 +6,7 @@
 #include "driver/rmt_rx.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -29,6 +30,7 @@ static rmt_symbol_word_t s_rx_buf[IR_RX_BUF_SIZE];
 static ir_capture_t s_last_capture;
 static volatile bool s_capturing = false;
 static volatile bool s_capture_ready = false;
+static SemaphoreHandle_t s_ir_mutex = NULL;
 
 static const uint32_t NEC_CARRIER_HZ = 38000;
 
@@ -120,6 +122,10 @@ esp_err_t ir_engine_init(int tx_gpio, int rx_gpio)
 {
     if (s_initialized) return ESP_OK;
 
+    if (!s_ir_mutex) {
+        s_ir_mutex = xSemaphoreCreateMutex();
+    }
+
     s_tx_gpio = tx_gpio;
     s_rx_gpio = rx_gpio;
 
@@ -135,9 +141,13 @@ esp_err_t ir_engine_init(int tx_gpio, int rx_gpio)
             ESP_LOGE(TAG, "Failed to create RMT TX channel");
         } else {
             rmt_copy_encoder_config_t enc_cfg = {};
-            rmt_new_copy_encoder(&enc_cfg, &s_copy_encoder);
-            rmt_enable(s_tx_channel);
-            ESP_LOGI(TAG, "IR TX ready on GPIO%d", tx_gpio);
+            if (rmt_new_copy_encoder(&enc_cfg, &s_copy_encoder) != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to create RMT copy encoder");
+            } else if (rmt_enable(s_tx_channel) != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to enable RMT TX");
+            } else {
+                ESP_LOGI(TAG, "IR TX ready on GPIO%d", tx_gpio);
+            }
         }
     }
 
@@ -154,8 +164,11 @@ esp_err_t ir_engine_init(int tx_gpio, int rx_gpio)
         } else {
             rmt_rx_event_callbacks_t cbs = { .on_recv_done = rx_done_cb };
             rmt_rx_register_event_callbacks(s_rx_channel, &cbs, NULL);
-            rmt_enable(s_rx_channel);
-            ESP_LOGI(TAG, "IR RX ready on GPIO%d", rx_gpio);
+            if (rmt_enable(s_rx_channel) != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to enable RMT RX");
+            } else {
+                ESP_LOGI(TAG, "IR RX ready on GPIO%d", rx_gpio);
+            }
         }
     }
 
@@ -307,7 +320,9 @@ esp_err_t ir_send_signal(const ir_signal_t *signal)
 esp_err_t ir_capture_start(uint32_t timeout_ms)
 {
     if (!s_rx_channel) return ESP_ERR_INVALID_STATE;
-    if (s_capturing) return ESP_OK;
+
+    if (s_ir_mutex) xSemaphoreTake(s_ir_mutex, portMAX_DELAY);
+    if (s_capturing) { if (s_ir_mutex) xSemaphoreGive(s_ir_mutex); return ESP_OK; }
 
     s_capturing = true;
     s_capture_ready = false;
@@ -316,20 +331,26 @@ esp_err_t ir_capture_start(uint32_t timeout_ms)
     esp_err_t ret = rmt_receive(s_rx_channel, s_rx_buf, sizeof(s_rx_buf), &s_rx_cfg);
 
     if (timeout_ms > 0) {
+        if (s_ir_mutex) xSemaphoreGive(s_ir_mutex);
         vTaskDelay(pdMS_TO_TICKS(timeout_ms));
+        if (s_ir_mutex) xSemaphoreTake(s_ir_mutex, portMAX_DELAY);
         if (s_capturing) {
             rmt_disable(s_rx_channel);
             s_capturing = false;
+            rmt_enable(s_rx_channel);
         }
     }
 
+    if (s_ir_mutex) xSemaphoreGive(s_ir_mutex);
     return ret;
 }
 
 esp_err_t ir_capture_stop(void)
 {
+    if (s_ir_mutex) xSemaphoreTake(s_ir_mutex, portMAX_DELAY);
     s_capturing = false;
     if (s_rx_channel) rmt_disable(s_rx_channel);
+    if (s_ir_mutex) xSemaphoreGive(s_ir_mutex);
     return ESP_OK;
 }
 
@@ -425,6 +446,7 @@ esp_err_t ir_learned_send(const char *name)
     size_t len = sizeof(buf);
     esp_err_t ret = storage_read_file(path, (uint8_t *)buf, len, &len);
     if (ret != ESP_OK) return ret;
+    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
     buf[len] = '\0';
 
     uint32_t pulses[IR_SIGNAL_MAX_LEN];
@@ -453,5 +475,23 @@ int ir_encode_nec(uint16_t addr, uint16_t cmd, uint32_t *pulses, uint32_t *count
 {
     if (!pulses || !count) return -1;
     build_nec_pulses(addr, cmd, pulses, count);
+    return 0;
+}
+
+int ir_codes_lookup(const char *brand, const char *device, ir_code_t *codes, int max)
+{
+    (void)brand; (void)device; (void)codes; (void)max;
+    return 0;
+}
+
+int ir_codes_list_brands(char brands[][IR_BRAND_NAME_MAX], int max)
+{
+    (void)brands; (void)max;
+    return 0;
+}
+
+int ir_codes_list_devices(const char *brand, char devices[][IR_DEVICE_NAME_MAX], int max)
+{
+    (void)brand; (void)devices; (void)max;
     return 0;
 }

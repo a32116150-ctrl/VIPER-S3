@@ -472,7 +472,8 @@ esp_err_t ai_twin_spawn_wifi(int index, uint32_t duration_ms)
              p->name, p->wifi.channel, (unsigned long)duration_ms);
 
     const char *ssids[2] = { p->wifi.ssid, NULL };
-    wifi_beacon_flood_start(ssids, 1, p->wifi.channel, p->wifi.beacon_interval_ms);
+    uint32_t pps = p->wifi.beacon_interval_ms > 0 ? (1000 / p->wifi.beacon_interval_ms) : 10;
+    wifi_beacon_flood_start(ssids, 1, p->wifi.channel, pps);
     vTaskDelay(pdMS_TO_TICKS(duration_ms > 0 ? duration_ms : 5000));
     wifi_beacon_flood_stop();
 
@@ -482,41 +483,30 @@ esp_err_t ai_twin_spawn_wifi(int index, uint32_t duration_ms)
 esp_err_t ai_twin_spawn_all(uint32_t duration_ms)
 {
     int spawned = 0;
+
     for (int i = 0; i < AI_TWIN_PROFILES_MAX; i++) {
         if (!s_twin_lib.profiles[i].name[0]) continue;
-
-        switch (s_twin_lib.profiles[i].type) {
-            case TWIN_TYPE_BLE_DEVICE:
-                for (int j = 0; j < AI_TWIN_PROFILES_MAX; j++) {
-                    if (s_twin_lib.profiles[j].name[0] &&
-                        s_twin_lib.profiles[j].type == TWIN_TYPE_BLE_DEVICE) {
-                        ai_twin_spawn_ble(j, duration_ms / 2);
-                        spawned++;
-                        break;
-                    }
-                }
-                break;
-            case TWIN_TYPE_WIFI_AP: {
-                int ap_count = 0;
-                const char *ssid_list[AI_TWIN_PROFILES_MAX + 1];
-                for (int j = 0; j < AI_TWIN_PROFILES_MAX; j++) {
-                    if (s_twin_lib.profiles[j].name[0] &&
-                        s_twin_lib.profiles[j].type == TWIN_TYPE_WIFI_AP) {
-                        ssid_list[ap_count++] = s_twin_lib.profiles[j].wifi.ssid;
-                    }
-                }
-                ssid_list[ap_count] = NULL;
-                if (ap_count > 0) {
-                    wifi_beacon_flood_start(ssid_list, ap_count, 6, 100);
-                    vTaskDelay(pdMS_TO_TICKS(duration_ms / 2));
-                    wifi_beacon_flood_stop();
-                    spawned++;
-                }
-                break;
-            }
-            default:
-                break;
+        if (s_twin_lib.profiles[i].type == TWIN_TYPE_BLE_DEVICE) {
+            ai_twin_spawn_ble(i, duration_ms / 2);
+            spawned++;
         }
+    }
+
+    int ap_count = 0;
+    const char *ssid_list[AI_TWIN_PROFILES_MAX + 1];
+    for (int i = 0; i < AI_TWIN_PROFILES_MAX; i++) {
+        if (s_twin_lib.profiles[i].name[0] &&
+            s_twin_lib.profiles[i].type == TWIN_TYPE_WIFI_AP) {
+            ssid_list[ap_count++] = s_twin_lib.profiles[i].wifi.ssid;
+        }
+    }
+    ssid_list[ap_count] = NULL;
+    if (ap_count > 0) {
+        int pps = 100;
+        wifi_beacon_flood_start(ssid_list, ap_count, 6, pps);
+        vTaskDelay(pdMS_TO_TICKS(duration_ms / 2));
+        wifi_beacon_flood_stop();
+        spawned++;
     }
 
     ESP_LOGI(TAG, "Spawned %d twin profiles (%lu ms)", spawned, (unsigned long)duration_ms);

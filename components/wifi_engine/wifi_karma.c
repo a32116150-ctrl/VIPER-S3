@@ -98,11 +98,16 @@ esp_err_t wifi_karma_start(void)
     if (s_running) return ESP_OK;
 
     s_running = true;
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_filter(&(wifi_promiscuous_filter_t){
+    esp_err_t r1 = esp_wifi_set_promiscuous(true);
+    esp_err_t r2 = esp_wifi_set_promiscuous_filter(&(wifi_promiscuous_filter_t){
         .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT
     });
-    esp_wifi_set_promiscuous_rx_cb(karma_rx_cb);
+    esp_err_t r3 = esp_wifi_set_promiscuous_rx_cb(karma_rx_cb);
+    if (r1 != ESP_OK || r2 != ESP_OK || r3 != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set promiscuous mode: %d %d %d", r1, r2, r3);
+        s_running = false;
+        return ESP_FAIL;
+    }
 
     ESP_LOGI(TAG, "Karma attack started — responding to all probe requests");
     return ESP_OK;
