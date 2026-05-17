@@ -26,7 +26,7 @@ Multi-function ESP32-S3 security testing tool with WiFi, BLE, USB, camera, NFC, 
 | **Protocol Attacks** | WPA3→WPA2 downgrade, SSL strip, canary tokens, behavioral fingerprinting |
 | **AI/ML** | Decision tree, KNN classifier, packet feature extraction, digital twin generation |
 | **Orchestrator** | Attack chains, triggers, scheduler, health monitor |
-| **Dashboard** | Dark SPA with 31 REST endpoints, WebSocket live updates, 11 frontend tabs |
+| **Dashboard** | Dark SPA with 53 REST endpoints, WebSocket live updates, 16 frontend tabs, HTTPS, API key auth |
 
 ## Partition Table (16MB)
 
@@ -50,25 +50,26 @@ idf.py -p /dev/ttyACM0 flash monitor
 ## Boot Sequence
 
 1. Mount LittleFS
-2. **Start Web Dashboard (port 80)** — **BEFORE WiFi** to maximize available DRAM; retries with smaller config on failure
-3. Start WiFi (AP on 192.168.4.1 + STA) — SSID `VIPER-S3`, password `00000000` (⚠️ WPA2 broken, open AP temporarily)
-4. Start IR (GPIO2=TX, GPIO4=RX) — **graceful fallback** on failure
-5. Start NFC (PN532 UART: GPIO18=TX, GPIO5=RX) — **graceful fallback** on failure
-6. Initialize Crack Engine + Protocol Attacks — **graceful fallback** on failure
-7. Start BLE (NimBLE scanner + UART C2) — **graceful fallback** on failure (controller disabled to save DRAM)
-8. Start USB (TinyUSB HID + CDC) — **graceful fallback** on failure
-9. Start AI Engine — **graceful fallback** on failure
-10. Start Camera (OV3660 MJPEG) — **graceful fallback** on failure
-11. Launch Attack Orchestrator; retry dashboard init if failed at step 2
+2. **Start Camera (OV3660 MJPEG)** — runs early to allocate DMA descriptor buffers before DRAM gets fragmented
+3. **Start Web Dashboard (port 443 HTTPS + port 80 HTTP)** — **BEFORE WiFi** to maximize available DRAM; retries with smaller config on failure; self-signed certs auto-generated at build
+4. Start WiFi (AP on 192.168.4.1 + STA) — SSID `VIPER-S3`, WPA2-PSK (pmf_cfg.required=false)
+5. Start IR (GPIO2=TX, GPIO4=RX) — **graceful fallback** on failure
+6. Start NFC (PN532 UART: GPIO18=TX, GPIO5=RX) — **graceful fallback** on failure
+7. Initialize Crack Engine + Protocol Attacks — **graceful fallback** on failure
+8. Start BLE (NimBLE) — **graceful skip** when controller disabled (`CONFIG_BT_CONTROLLER_DISABLED=y`)
+9. Start USB (TinyUSB HID + CDC) — **graceful fallback** on failure
+10. Start AI Engine — **graceful fallback** on failure
+11. Launch Attack Orchestrator; retry dashboard init if failed at step 3
 
-**All steps 2+ use graceful fallback. Dashboard is served in 512-byte chunks, has a watchdog that auto-restarts the server, a /ping endpoint for quick health check, and a fallback error page if HTML can't be sent.**
+**All steps 3+ use graceful fallback. Dashboard: HTTPS on port 443 + HTTP fallback, API key auth (default: "viper"), 512-byte chunked transfer, watchdog auto-restart, `/ping` health endpoint, fallback error page.**
 
 ## Access
 
-- **Dashboard**: http://192.168.4.1 (AP mode) or device IP
-- **WiFi AP**: SSID `VIPER-S3`, password `00000000` (⚠️ WPA2 broken — use open AP)
-- **BLE UART C2**: Connect via GATT
-- **USB**: Ducky Script payloads via CDC
+- **Dashboard**: https://192.168.4.1 (HTTPS, self-signed cert) or http://192.168.4.1 (HTTP fallback)
+- **Auth**: API key — default `"viper"`, change via `POST /api/auth`
+- **WiFi AP**: SSID `VIPER-S3`, WPA2-PSK password `00000000` (⚠️ untested — may need open AP)
+- **BLE**: Controller disabled by default (re-enable in `sdkconfig.defaults`)
+- **USB**: Ducky Script payloads via CDC serial
 
 ## Build Environment
 
@@ -76,7 +77,16 @@ idf.py -p /dev/ttyACM0 flash monitor
 - **Target**: `esp32s3`
 - **Python**: 3.13.7 (IDF v5.3 environment)
 
-### Flash Once
+### Build
+
+HTTPS certs are auto-generated at build time by `components/web_dashboard/gen_certs.sh`. Requires `openssl`.
+
+```bash
+. ~/esp/esp-idf/export.sh
+idf.py build
+```
+
+### Flash Once (combined binary)
 
 ```bash
 . ~/esp/esp-idf/export.sh
@@ -87,7 +97,7 @@ esptool.py --chip esp32s3 -b 115200 write_flash \
 
 > **Note**: Baud rate 115200 is the most reliable. Higher rates (460800) may fail.
 
-### Flash Separately (via idf.py)
+### Flash & Monitor (via idf.py)
 
 ```bash
 . ~/esp/esp-idf/export.sh
@@ -150,6 +160,8 @@ The codebase was originally written for ESP-IDF v4.x/early v5.x. These fixes wer
 | `CONFIG_HTTPD_WS_SUPPORT=y` | WebSocket API compile failure |
 | `CONFIG_TINYUSB_HID_COUNT=1` | HID keyboard code was compiled out at 0 |
 | `CONFIG_TINYUSB_MSC_ENABLED=` (disabled) | No MSC callbacks implemented, caused linker errors |
+| `CONFIG_BT_CONTROLLER_DISABLED=y` | Saves ~30KB DRAM; NimBLE host skipped gracefully at runtime |
+| `CONFIG_CAMERA_PSRAM_DMA=y` | Camera DMA descriptors use PSRAM instead of internal DRAM |
 
 ## License
 

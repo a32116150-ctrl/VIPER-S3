@@ -567,10 +567,11 @@ Prior commits include all the individual API migration fixes listed above.
 | WiFi AP | ✅ PMF fix applied (inline `.pmf_cfg` in config struct) |
 | WiFi Scanner | ✅ Fixed (ap_count init'd to WIFI_MAX_SCAN_RESULTS) |
 | NTLM Cracking | ✅ Fixed (MD4 Round 3 permutation corrected) |
-| BLE init | ⚠️ Graceful fallback — controller disabled (`CONFIG_BT_CONTROLLER_DISABLED=y`), NimBLE host compiles |
-| USB init | ⚠️ Graceful fallback — logs warning on failure, continues |
+| BLE init | ✅ **Fixed May 17** — controller disabled (`CONFIG_BT_CONTROLLER_DISABLED=y`), compile-time guard skips NimBLE host sync gracefully — no assert, no reboot loop |
+| USB init | ✅ Graceful fallback — logs warning on failure, continues |
+| USB enumeration | ✅ **Resolved May 17** — device re-enumerates after flash+reset |
 | Camera init | ✅ PSRAM DMA mode enabled — skips 16KB internal DRAM allocation |
-| Web Dashboard | ✅ **Reliable**: starts before WiFi (max DRAM), 16 frontend tabs, 53 REST endpoints, WS live updates, chunked transfer, watchdog, fallback error page |
+| Web Dashboard | ✅ **Reliable**: starts before WiFi (max DRAM), 16 frontend tabs, 53 REST endpoints, WS live updates, HTTPS (port 443) + HTTP fallback, API key auth, chunked transfer, watchdog, fallback error page |
 | Code Health | ⚠️ ~15 medium/low issues remaining after Fix #27 batch |
 
 ---
@@ -639,21 +640,32 @@ Source-verified findings from code audit across all 13 components.
 - Project root: `/Users/anoircherif/Desktop/S3/antigravity`
 - IDF path: `~/esp/esp-idf`
 - Built by opencode with assistant guidance
-- Last build: May 15, 2026 (Build succeeded — 0x136a10, 70% app partition free)
-- Last fix batch: May 15, 2026 (Fix #27 — 17 critical/high runtime bugs fixed across 9 components)
+- Last build: May 17, 2026 (Build succeeded — 0x137bf0, 70% app partition free)
+- Last flash: May 17, 2026 — verified clean boot through all 11 steps
+- Last fix batch: May 17, 2026 (BLE compile-time guard for disabled controller; USB enumeration confirmed working)
 
 ---
 
-## Pending Issues (May 15, 2026) — Updated
+## Pending Issues — Updated May 17, 2026
 
-### USB Enumeration Failure After Flash
-- **Symptom**: After a successful `idf.py flash` + hard reset, the ESP32-S3 USB serial port (`/dev/cu.usbmodem5B3E0963551`) disappeared and never re-enumerated. The device is not visible in `system_profiler SPUSBDataType` or `ioreg`.
-- **Impact**: Cannot run `idf.py monitor` to read boot logs, cannot flash new firmware.
-- **Tried**: Unplug/replug, hold BOOT while plugging in, `sudo killall -STOP/COMT usbd`, `ifconfig awdl0 down/up`, different USB ports.
-- **Hypothesis**: Possibly a USB cable issue (power-only), or the ESP32-S3 USB-serial-JTAG bridge entered an unrecoverable state after the hard reset.
-- **Next step**: Reboot MacBook, try different USB cable. If device still doesn't enumerate, check if ESP32-S3 board has a hardware fault (e.g., burnt USB-serial bridge).
+### USB Enumeration Failure After Flash 🔴 RESOLVED
+- **Symptom**: After `idf.py flash` + hard reset, the ESP32-S3 USB serial port (`/dev/cu.usbmodem5B3E0963551`) disappeared and never re-enumerated.
+- **Resolution**: After taking a break and retrying hours later, the device re-enumerated normally. Issue was likely transient (possibly macOS USB stack state, cable reseat, or the device needed a full power cycle). Both subsequent flash sessions completed with no enumeration issues.
+- **Verification**: Successfully built and flashed firmware twice on May 17, 2026. Device appeared as `/dev/cu.usbmodem5B3E0963551` both times and remained visible after hard reset.
 
-### Fixes Applied (all 20 critical/high runtime bugs from May 15 audit now fixed)
+### BLE Assert on Boot (NimBLE host with controller disabled) 🔴 RESOLVED
+- **Symptom**: When `CONFIG_BT_CONTROLLER_DISABLED=y`, `ble_engine_init()` calls `nimble_port_init()` (succeeds), then starts `ble_host_task` which calls `nimble_port_run()`. The NimBLE host tries to sync with the missing controller and asserts: `assert failed: ble_hs_event_start_stage2 ble_hs.c:582 (rc == 0)`. This causes a reboot loop — the device never reaches the attack orchestrator.
+- **Fix**: Added compile-time guard in `components/ble_engine/ble_engine.c:42`:
+  ```c
+  #ifdef CONFIG_BT_CONTROLLER_DISABLED
+      ESP_LOGW(TAG, "BLE controller disabled at build config — BLE unavailable");
+      return ESP_ERR_NOT_SUPPORTED;
+  #endif
+  ```
+  When the controller is disabled, `ble_engine_init()` returns immediately with `ESP_ERR_NOT_SUPPORTED` and a warning log. The boot sequence continues with step [9/11] normally.
+- **Verification**: After re-flash, boot log shows: `W (3002) BLE: BLE controller disabled at build config — BLE unavailable` — no assert, no reboot loop. All 11 boot steps complete successfully.
+
+### Fixes Applied (all 20 critical/high runtime bugs from May 15 audit + BLE assert fix May 17)
 
 **Fix #26 batch** (PMF, scanner, MD4 — 3 critical compile bugs):
 1. PMF fix v2 — replaced removed `esp_wifi_disable_pmf_config()` with inline `.pmf_cfg = {.required = false}`

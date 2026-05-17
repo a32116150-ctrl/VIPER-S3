@@ -1,6 +1,6 @@
 # VIPER-S3 Development Progress
 
-> **Current Status**: Device flashed and running. All 25 vulnerabilities fixed + L1 (API auth) + L2 (HTTPS) + L3 + L4 + L5. BLE crash (NULL store callback) fixed. Build succeeds, device online at https://192.168.4.1 (self-signed cert). Auth enabled default "viper". L6 WPA2-PSK fix still needs hardware WPA2 client test.
+> **Current Status (May 17, 2026)**: Device flashed and running. All 25+ vulnerabilities fixed + L1 (API auth) + L2 (HTTPS) + L3 + L4 + L5. USB enumeration ✅ (device re-enumerates after flash). BLE assert on disabled controller ✅ (compile-time guard). Build succeeds, device boots clean through all 11 steps. Dashboard at https://192.168.4.1 (self-signed cert, auto-generated at build). Auth enabled default "viper". L6 WPA2-PSK fix applied (code-level, untested — needs WPA2 client hardware test).
 
 ## Phase 1 — Core Infrastructure ✅
 - `CMakeLists.txt`, `partitions.csv`, `sdkconfig.defaults`
@@ -75,13 +75,14 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
 | HTTP server start failure | ✅ | Fixed — dashboard starts BEFORE WiFi (step 2), stack_size=4096+retry, BLE controller disabled to free ~30KB |
 | HTTP server boot-loop (out of memory) | ✅ | Fixed — `max_open_sockets=8`, `max_uri_handlers` auto-calculated from `sizeof(s_uris)`, `stack_size=4096` |
 | HTTP response hangs (infinite spinner) | ✅ | Fixed — chunked transfer (512B), fallback error page, watchdog auto-recovery |
-| BLE controller init fails | ✅ | Acceptable — controller disabled (`CONFIG_BT_CONTROLLER_DISABLED=y`) to free DRAM; NimBLE host compiles, graceful fallback |
+| BLE assert on disabled controller | ✅ | Fixed May 17 — compile-time guard in `ble_engine_init()` returns `ESP_ERR_NOT_SUPPORTED` when `CONFIG_BT_CONTROLLER_DISABLED=y`; no more `ble_hs_event_start_stage2` assert |
+| BLE controller init | ✅ | Acceptable — controller disabled (`CONFIG_BT_CONTROLLER_DISABLED=y`) to free DRAM; NimBLE host compiles, graceful skip |
 | USB init | ✅ | Graceful fallback in place — no crash |
+| USB serial enumeration post-flash | ✅ | **Resolved May 17** — device re-enumerates after flash+hard-reset on both flash attempts |
 | Web Dashboard nav tabs | ✅ | Fixed — switched from addEventListener to onclick attributes |
 | Dashboard JS syntax error | ✅ | Fixed — missing semicolon in loadConfig JS |
 | WPA2-PSK auth failure | ✅ | Fixed — `esp_wifi_disable_pmf_config(WIFI_IF_AP)` added; stale PMF "required" values in NVS from ESP-IDF v5.3 cleared on boot |
-| USB serial enumeration post-flash | ❌ **BLOCKING** | After flash + hard reset, ESP32-S3 USB serial port disappeared from macOS; cannot monitor or re-flash |
-| WiFi AP | ⚠️ | SSID `VIPER-S3`, reachable at 192.168.4.1 — WPA2-PSK fix applied (needs flash + test verification) |
+| WiFi AP | ⚠️ | SSID `VIPER-S3`, reachable at 192.168.4.1 — WPA2-PSK fix applied (needs WPA2 client hardware test to confirm) |
 
 ## Mitigations Applied
 
@@ -105,11 +106,12 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
 - [x] Fix L5 — replace 10 stale Kconfig symbols in sdkconfig.defaults
 - [x] Fix L1 — Add API key authentication (`X-API-Key` header, `POST /api/auth` login, default `"viper"`)
 - [x] Fix L2 — Add HTTPS with embedded self-signed cert (port 443, auto-fallback to HTTP)
-- [ ] **🔴 USB enumeration** — Reboot MacBook, try different cable to get ESP32-S3 serial port back
-- [ ] **Flash & test** — Flash the new firmware (all 25+ vulnerability fixes + L1+L2)
-- [ ] **Fix L6** — Verify WPA2-PSK works (code fix applied, needs hardware test)
+- [x] **🔴 USB enumeration** — Resolved May 17 (re-flashed twice, device re-enumerated both times)
+- [x] **Flash & test** — Flashed May 17; boot verified clean through all 11 steps, no reboot loop
+- [x] **Commit and push to GitHub** — Committed and pushed 73e8a3a
+- [x] **Fix BLE assert** — Fixed May 17 (compile-time guard for disabled controller)
+- [ ] **Fix L6** — Verify WPA2-PSK works (code fix applied, needs WPA2 client hardware test)
 - [ ] **Test dashboard** — Verify http://192.168.4.1 loads, test all endpoints
-- [ ] Commit and push to GitHub
 
 ---
 

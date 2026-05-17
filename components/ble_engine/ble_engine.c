@@ -39,6 +39,11 @@ esp_err_t ble_engine_init(void)
 {
     if (s_initialized) return ESP_OK;
 
+#ifdef CONFIG_BT_CONTROLLER_DISABLED
+    ESP_LOGW(TAG, "BLE controller disabled at build config — BLE unavailable");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
