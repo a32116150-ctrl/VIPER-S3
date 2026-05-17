@@ -1,6 +1,6 @@
 # VIPER-S3 Development Progress
 
-> **Current Status (May 17, 2026)**: Device flashed and running. All 25+ vulnerabilities fixed + L1 (API auth) + L2 (HTTPS) + L3 + L4 + L5. USB enumeration ✅ (device re-enumerates after flash). BLE assert on disabled controller ✅ (compile-time guard). Build succeeds, device boots clean through all 11 steps. Dashboard at https://192.168.4.1 (self-signed cert, auto-generated at build). Auth enabled default "viper". L6 WPA2-PSK fix applied (code-level, untested — needs WPA2 client hardware test). **Code review (May 17)**: 3 additional bugs fixed + 5 findings documented.
+> **Current Status (May 17, 2026)**: Device flashed and running. Dashboard auth **fully fixed** — frontend JS now injects `X-API-Key` header automatically via monkey-patched `window.fetch`, with `?key=` fallback for direct-tab endpoints. New panels: **AUTO-PWNER** (autonomous 7-step attack chain), **Map** (canvas network topology), **Report** (downloadable HTML session report). Captive portal: 3 premium templates (Google, Windows AD, Hotel). All 25+ vulnerabilities fixed. USB enumeration ✅ BLE assert on disabled controller ✅ Build succeeds, boots clean. HTTP on port 80. Auth default `"viper"`. L6 WPA2-PSK fix applied (code-level, untested). **Code review (May 17)**: 3 additional bugs fixed + 5 findings documented.
 
 ## Phase 1 — Core Infrastructure ✅
 - `CMakeLists.txt`, `partitions.csv`, `sdkconfig.defaults`
@@ -122,6 +122,13 @@ NimBLE scanner, Apple/Google/iBeacon decoder, 7-type spam, GATT UART C2
   - [x] `api_captures_creds/hashes` — JSONL→JSON array conversion; corrected count (was hardcoded to 1)
   - [x] `api_ir_learned` — replaced unbounded `sprintf` with `snprintf` + bounds tracking
   - [x] `ble_engine_init` — removed duplicate `nvs_flash_init()` that could wipe NVS config on corruption
+- [x] **Fix dashboard auth** — Frontend JS monkey-patches fetch() to inject X-API-Key; ?key= query param fallback
+- [x] **Add AUTO-PWNER panel** — 7-step autonomous attack chain with live step badges, WebSocket events
+- [x] **Add Map panel** — Canvas network topology visualization
+- [x] **Add Report endpoint** — Downloadable HTML session report with creds, hashes, stats
+- [x] **Premium captive portals** — Google, Windows AD, Hotel templates
+- [x] **Move log buffer to PSRAM** — Saves 16KB internal DRAM
+- [x] **Fix JSONL parsing** — JSONL→JSON array conversion for captures/hashes APIs
 - [ ] **Fix L6** — Verify WPA2-PSK works (code fix applied, needs WPA2 client hardware test)
 - [ ] **Test dashboard** — Verify http://192.168.4.1 loads, test all endpoints
 - [ ] **Move `s_log_buf` to PSRAM** — Free 16KB internal DRAM (`heap_caps_malloc(16384, MALLOC_CAP_SPIRAM)`)
