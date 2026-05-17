@@ -1436,9 +1436,14 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             ESP_LOGI(TAG, "Dashboard served from PSRAM (%u bytes)", html_len);
             return ESP_OK;
         }
-        ESP_LOGW(TAG, "PSRAM send failed (%s), retrying chunked", esp_err_to_name(err));
-        /* Fall through to chunked — headers are already sent but httpd_resp_send_chunk
-         * will overwrite Content-Type with Transfer-Encoding: chunked. */
+        ESP_LOGW(TAG, "PSRAM send failed (%s) — returning error; browser will retry",
+                 esp_err_to_name(err));
+        /* httpd_resp_send failed after headers were flushed.
+         * Do NOT attempt chunked recovery — the connection state is inconsistent.
+         * Return ESP_FAIL so the server closes the socket; the browser retries
+         * on a fresh connection, and if PSRAM is still OOM it falls through to
+         * the chunked path below (buf is NULL on retry). */
+        return ESP_FAIL;
     }
 
     ESP_LOGW(TAG, "Chunked transfer for dashboard HTML (%u bytes)", html_len);
